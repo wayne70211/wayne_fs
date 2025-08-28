@@ -2,6 +2,7 @@
 import os, struct, argparse, math, sys, time
 from layout import Superblock, DictEnDecoder, Inode, InodeMode, inode_write
 from disk import Disk
+from bitmap import BlockBitmap
 
 MAGIC = b"WAYNE_FS"
 SB_FMT = "<8sIIIIIIIII"  # magic + 9 uint32
@@ -79,9 +80,9 @@ def make_image(path, size_mb, block_size, inode_count):
         f.write(block)
 
         # create root inode
-        curr_time = int(time.time())
-        root = Inode(type=InodeMode.S_IFDIR, nlink=2, size=len(dir_bytes), ctime=curr_time, mtime=curr_time, atime=curr_time)
-
+        root = Inode.empty(mode=InodeMode.S_IFDIR)
+        root.nlink = 2
+        root.size = len(dir_bytes)
         root.direct[0] = data_start
         f.seek(inode_table_start * block_size)
         f.write(root.pack())

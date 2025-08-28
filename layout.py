@@ -2,8 +2,9 @@
 import struct
 from dataclasses import dataclass, field
 from disk import Disk
-from typing import List
+from typing import List, Tuple
 from enum import IntFlag
+import time
 
 
 MAGIC = b"WAYNE_FS"
@@ -21,6 +22,7 @@ class InodeMode(IntFlag):
     S_IFDIR  = 0x4000
     S_IFCHR  = 0x2000
     S_IFIFO  = 0x1000
+    S_INIT   = 0x0000
 
     # 權限位（低 9 bits，類似 0o755, 0o644）
     S_IRUSR = 0o400
@@ -35,22 +37,18 @@ class InodeMode(IntFlag):
 
 @dataclass
 class Inode:
-    type: int = 0  # 4
+    mode: int = 0  # 4
     nlink: int = 0 # 4
     size: int = 0  # 8
     ctime: int = 0 # 8
     mtime: int = 0 # 8
     atime: int = 0 # 8
-    reserved: int = 0
-    direct = [0] * 12
+    direct: list = field(default_factory=lambda: [0]*12)
 
-    #def __post_init__(self):
-    #    self.directed = [0] * 12
-
-    def pack(self) -> bytes:
+    def pack(self) -> bytearray:
         data = bytearray()
         print("atime", self.atime)
-        data += struct.pack("<I", self.type)
+        data += struct.pack("<I", self.mode) 
         data += struct.pack("<I", self.nlink)
         data += struct.pack("<Q", self.size)
         data += struct.pack("<Q", self.ctime)
@@ -62,18 +60,24 @@ class Inode:
         return data
 
     @classmethod
+    def empty(cls, mode: int):
+        now = int(time.time())
+        return cls(mode, 0, 0, now, now, now, [0]*12)
+
+    @classmethod
     def unpack(cls, raw):
         off = 0
-        cls.type = struct.unpack_from("<I", raw, off)[0]; off += 4
-        cls.nlink = struct.unpack_from("<I", raw, off)[0]; off += 4
-        cls.size = struct.unpack_from("<Q", raw, off)[0]; off += 8
-        cls.ctime = struct.unpack_from("<Q", raw, off)[0]; off += 8
-        cls.mtime = struct.unpack_from("<Q", raw, off)[0]; off += 8
-        cls.atime = struct.unpack_from("<Q", raw, off)[0]; off += 8
+        mode = struct.unpack_from("<I", raw, off)[0]; off += 4
+        nlink = struct.unpack_from("<I", raw, off)[0]; off += 4
+        size = struct.unpack_from("<Q", raw, off)[0]; off += 8
+        ctime = struct.unpack_from("<Q", raw, off)[0]; off += 8
+        mtime = struct.unpack_from("<Q", raw, off)[0]; off += 8
+        atime = struct.unpack_from("<Q", raw, off)[0]; off += 8
+        direct = [0] * 12
         for idx in range(12):
-            cls.direct[idx] = struct.unpack_from("<I", raw, off)[0]; off += 4
+            direct[idx] = struct.unpack_from("<I", raw, off)[0]; off += 4
 
-        return cls
+        return cls(mode, nlink, size, ctime, mtime, atime, direct)
 
 
 @dataclass
@@ -125,7 +129,7 @@ class DictEnDecoder:
           data += name_b
       return bytes(data)
 
-  def unpack_dir(raw):
+  def unpack_dir(raw) -> List[Tuple[int, str]]:
       """
       raw: bytes of a directory file
       return: List[Tuple[int, str]]
@@ -158,6 +162,4 @@ def inode_read(disk: Disk, sb: Superblock, idx: int) -> Inode:
 
 def inode_write(disk: Disk, sb: Superblock, idx: int, inode: Inode):
     off = inode_offset(sb, idx)
-    print(off)
-    print(inode.pack())
-    disk.write_at(off, inode.pack())
+    disk.write_at(off, inode.pack())    
