@@ -176,8 +176,47 @@ class WayneFS(LoggingMixIn, Operations):
         self.bitmap.flush()
         self.disk.fsync()
 
-        print("[T] mkdir success")
 
+    def rmdir(self, path):
+        parent_path, _ = self._split(path)
+        parent_ino = self._lookup(parent_path)
+        parent_inode = self._iget(parent_ino)
+
+        curr_ino = self._lookup(path)
+        if curr_ino == ROOT_INO:
+            raise OSError(errno.EPERM, "Root directory can not be removed")
+         
+        curr_inode = self._iget(curr_ino)
+        if curr_inode.mode != InodeMode.S_IFDIR:
+            raise OSError(errno.ENOENT, "No such directory") 
+        
+        curr_entries = self._read_dir_entries(curr_inode)
+        if len(curr_entries) > 2:
+            raise OSError(errno.ENOTEMPTY, "Directory is not empty") 
+        
+        self._free_block(curr_inode.direct[0])
+        self._free_inode(curr_ino)
+
+        old_parent_entries = self._read_dir_entries(parent_inode)
+        new_parent_entries = []
+        for child_ino, child_name in old_parent_entries:
+            if child_ino == curr_ino:
+                continue
+            new_parent_entries.append((child_ino, child_name))
+
+        assert len(old_parent_entries) == len(new_parent_entries) + 1
+        
+        parent_inode.nlink -= 1
+        assert parent_inode.nlink >= 2
+
+        # write back entries of parent
+        self._write_dir_entries(parent_inode, new_parent_entries)
+        
+        # write back of parent inode to inode table
+        inode_write(self.disk, self.sb, parent_ino, parent_inode)
+        
+        self.bitmap.flush()
+        self.disk.fsync()
 
 def main():
     ap = argparse.ArgumentParser()

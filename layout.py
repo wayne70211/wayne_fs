@@ -61,6 +61,8 @@ class Inode:
 
     @classmethod
     def empty(cls, mode: int):
+        if mode == InodeMode.S_INIT:
+            return cls()
         now = int(time.time())
         return cls(mode, 0, 0, now, now, now, [0]*12)
 
