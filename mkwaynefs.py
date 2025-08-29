@@ -8,6 +8,7 @@ MAGIC = b"WAYNE_FS"
 SB_FMT = "<8sIIIIIIIII"  # magic + 9 uint32
 SB_SIZE = struct.calcsize(SB_FMT)
 INODE_SIZE = 128
+ROOT_INO = 0 
 
 def ceil_div(a, b): return (a + b - 1) // b
 
@@ -71,25 +72,32 @@ def make_image(path, size_mb, block_size, inode_count):
         print(inode_table_start * block_size)
         f.write(b"\x00" * (inode_blocks * block_size))
 
-    # write first two node
-    with open(path, "r+b") as f:
-        root_entries = [(0, "."), (0, "..")]
-        dir_bytes = DictEnDecoder.pack_dir(root_entries)
-        f.seek(data_start * block_size)
-        block = dir_bytes.ljust(block_size, b"\x00")
-        f.write(block)
 
-        # create root inode
-        root = Inode.empty(mode=InodeMode.S_IFDIR)
-        root.nlink = 2
-        root.size = len(dir_bytes)
-        root.direct[0] = data_start
-        f.seek(inode_table_start * block_size)
-        f.write(root.pack())
-        # set using bitmap
+    disk = Disk(path)
+    sb = Superblock.load(disk)
+    bitmap = BlockBitmap(disk, sb)
 
-        # update and write bitmap
+    # write first two node in data start
+    root_blk = sb.data_start
+    root_entries = [(0, "."), (0, "..")]
+    raw_data = DictEnDecoder.pack_dir(root_entries)
+    disk.write_block(root_blk, raw_data + b"\x00" * (sb.block_size - len(raw_data)))
 
+    # write root inode into indoe table
+    root_inode = Inode.empty(mode=InodeMode.S_IFDIR)
+    root_inode.nlink = 2
+    root_inode.size  = len(raw_data)
+    root_inode.direct[0] = sb.data_start
+    inode_write(disk, sb, ROOT_INO, root_inode)
+
+    # update the valid bitmap
+    # set used for all blk before data_start 
+    for ino in range(root_blk):
+        bitmap.set_used(ino)
+    # set root data is used
+    bitmap.set_used(root_blk)
+    bitmap.flush()
+    disk.fsync()
 
     print(f"Created image: {path}")
     print(f"  size_mb={size_mb}, block_size={block_size}, total_blocks={total_blocks}")

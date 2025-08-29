@@ -29,7 +29,7 @@ class BlockBitmap:
         b, bit = self._byte_bit(idx)
         self.buf[b] &= ~(1 << bit)
 
-    def find_free(self, start_idx: int = 0):
+    def find_free_block(self, start_idx: int = 0):
         n = self.nblocks
         i = start_idx
         while i < n:
@@ -37,6 +37,15 @@ class BlockBitmap:
                 return i
             i += 1
         return -1
+    
+    def set_used(self, idx):
+        self.set(idx)
+
+    def clear_used(self, idx):
+        self.clear(idx)
+
+    def flush(self):
+        self.disk.write_at(self.sb.free_bitmap_start*self.sb.block_size, self.buf)
 
         
 
