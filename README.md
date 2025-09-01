@@ -1,4 +1,21 @@
-## Wayne File System
+# Wayne File System
+
+## Target
+
+在這個專案中，利用 python 模擬 file system 並且串接 VFS 介面，讓 FUSE 可以成功掛載 image 成 disk 
+
+### 第一階段
+1. 建立 SuperBlock，類似其他 file system header file 功能，裡面含有 patition 資訊
+2. 建立 Inode Table，類似其他 file system metadata 功能，紀錄當前資料的資訊以及實體 offset，就是 LBA
+3. 建立 Bitmap，紀錄哪些實體位置可以使用
+
+### 第二階段
+1. 實作 getattr, readdir, mkdir, rmdir 等功能，並且利用 `ls -la` 驗證
+2. 實際 write file 並且根據 `hexdump -C` 確認 SuperBlock 正確性
+3. 確認 bitmap 正確性
+
+### 第三階段
+1. 思考是否能以 FTL 角度優化此設計
 
 ### Doc
 
