@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, struct, argparse, math, sys, time
-from layout import Superblock, DictEnDecoder, Inode, InodeMode, inode_write
+from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable
 from disk import Disk
 from bitmap import BlockBitmap
 
@@ -76,6 +76,7 @@ def make_image(path, size_mb, block_size, inode_count):
     disk = Disk(path)
     sb = Superblock.load(disk)
     bitmap = BlockBitmap(disk, sb)
+    inode_table = InodeTable(disk, sb)
 
     # write first two node in data start
     root_blk = sb.data_start
@@ -88,7 +89,7 @@ def make_image(path, size_mb, block_size, inode_count):
     root_inode.nlink = 2
     root_inode.size  = len(raw_data)
     root_inode.direct[0] = sb.data_start
-    inode_write(disk, sb, ROOT_INO, root_inode)
+    inode_table.write(ROOT_INO, root_inode)
 
     # update the valid bitmap
     # set used for all blk before data_start 

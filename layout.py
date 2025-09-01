@@ -153,15 +153,21 @@ class DictEnDecoder:
           off += nlen
           out.append((ino, name))
       return out
-      
-def inode_offset(sb: Superblock, idx: int) -> int:
-    return sb.inode_table_start * sb.block_size + idx * INODE_SIZE
 
-def inode_read(disk: Disk, sb: Superblock, idx: int) -> Inode:
-    off = inode_offset(sb, idx)
-    raw = disk.read_at(off, INODE_SIZE)
-    return Inode.unpack(raw)
+class InodeTable:
+    def __init__(self, disk: Disk, sb: Superblock, inode_size: int = 128):
+        self.disk = disk
+        self.sb = sb
+        self.inode_size = inode_size
+        
+    def __inode_offset(self, idx: int) -> int:
+        return self.sb.inode_table_start * self.sb.block_size + idx * self.inode_size
 
-def inode_write(disk: Disk, sb: Superblock, idx: int, inode: Inode):
-    off = inode_offset(sb, idx)
-    disk.write_at(off, inode.pack())    
+    def read(self, idx: int) -> Inode:
+        off = self.__inode_offset(idx)
+        raw = self.disk.read_at(off, self.inode_size)
+        return Inode.unpack(raw)
+
+    def write(self, idx: int, inode: Inode):
+        off = self.__inode_offset(idx)
+        self.disk.write_at(off, inode.pack())    

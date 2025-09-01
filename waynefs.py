@@ -3,7 +3,7 @@ import os, errno, time, argparse
 from fuse import FUSE, Operations, LoggingMixIn
 from disk import Disk
 from bitmap import BlockBitmap
-from layout import Superblock, DictEnDecoder, Inode, InodeMode, inode_read, inode_write
+from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -15,11 +15,12 @@ class WayneFS(LoggingMixIn, Operations):
         self.disk = Disk(image_path)
         self.sb = Superblock.load(self.disk)
         self.bitmap = BlockBitmap(self.disk, self.sb)
+        self.inode_table = InodeTable(self.disk, self.sb)
         self.start = time.time()
 
     # --- helpers ---
-    def _iget(self, ino: int):
-        return inode_read(self.disk, self.sb, ino)
+    def _iget(self, ino: int) -> Inode:
+        return self.inode_table.read(ino)
     
     def _read_dir_entries(self, curr_inode: Inode):
         """
@@ -52,7 +53,7 @@ class WayneFS(LoggingMixIn, Operations):
         raise OSError(errno.ENOSPC, "No free inode") 
     
     def _free_inode(self, ino: int):
-        inode_write(self.disk, self.sb, ino, Inode.empty(mode=InodeMode.S_INIT))
+        self.inode_table.write(ino, Inode.empty(mode=InodeMode.S_INIT))
         return
     
     def _alloc_block(self):
@@ -72,13 +73,14 @@ class WayneFS(LoggingMixIn, Operations):
         
         all_path = [seg for seg in path.split("/") if seg]     
         curr_ino = ROOT_INO
+        print("_lookup", all_path)
         for name in all_path:
             if name == ".":
                 continue
             elif name == "..":
                 curr_inode = self._iget(curr_ino)
                 if curr_inode.mode != InodeMode.S_IFDIR:
-                    raise OSError(errno.ENOENT, "No such file or directory") 
+                    raise OSError(errno.ENOENT, "[A] No such file or directory") 
                 parent_ino = None
                 for child_ino, child_name in self._read_dir_entries(curr_inode):
                     if child_name == name:
@@ -91,7 +93,7 @@ class WayneFS(LoggingMixIn, Operations):
             else:
                 curr_inode = self._iget(curr_ino)
                 if curr_inode.mode != InodeMode.S_IFDIR:
-                    raise OSError(errno.ENOENT, "No such file or directory") 
+                    raise OSError(errno.ENOENT, "[B] No such file or directory") 
                 next_ino = None
                 for child_ino, child_name in self._read_dir_entries(curr_inode):
                     if child_name == name:
@@ -99,7 +101,7 @@ class WayneFS(LoggingMixIn, Operations):
                         break
                 # not found
                 if next_ino is None:
-                    raise OSError(errno.ENOENT, "No such file or directory") 
+                    raise OSError(errno.ENOENT, "[C] No such file or directory") 
                 
                 curr_ino = next_ino
 
@@ -111,7 +113,7 @@ class WayneFS(LoggingMixIn, Operations):
         
         all_path = [seg for seg in path.split("/") if seg]
 
-        return "".join(all_path[:-1]),all_path[-1]
+        return "/".join(all_path[:-1]),all_path[-1]
     # --- FUSE ops ---
     def getattr(self, path, fh=None):
         curr_ino = self._lookup(path)
@@ -139,6 +141,7 @@ class WayneFS(LoggingMixIn, Operations):
     
     def mkdir(self, path, mode: int):
         parent_path, curr_dir_name = self._split(path)
+        print("mkdir path1 = ", path, "parent path = ", parent_path, "curr_dir_name", curr_dir_name)
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
         print("mkdir path = ", path, "mode = ", parent_inode.mode, "parent path = ", parent_path, "curr_dir_name", curr_dir_name)
@@ -164,14 +167,14 @@ class WayneFS(LoggingMixIn, Operations):
         child_inode.nlink = 2
         child_inode.size  = len(raw_data)
         child_inode.direct[0] = child_blk
-        inode_write(self.disk, self.sb, child_ino, child_inode)
+        self.inode_table.write(child_ino, child_inode)
 
         # Parent Inode
         parent_entries.append((child_ino, curr_dir_name))
         self._write_dir_entries(parent_inode, parent_entries)
         parent_inode.nlink += 1
         parent_inode.ctime = parent_inode.mtime = child_inode.ctime
-        inode_write(self.disk, self.sb, parent_ino, parent_inode)
+        self.inode_table.write(parent_ino, parent_inode)
 
         self.bitmap.flush()
         self.disk.fsync()
@@ -213,7 +216,7 @@ class WayneFS(LoggingMixIn, Operations):
         self._write_dir_entries(parent_inode, new_parent_entries)
         
         # write back of parent inode to inode table
-        inode_write(self.disk, self.sb, parent_ino, parent_inode)
+        self.inode_table.write(parent_ino, parent_inode)
         
         self.bitmap.flush()
         self.disk.fsync()
