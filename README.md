@@ -2,11 +2,11 @@
 
 ## Target
 
-在這個專案中，利用 python 模擬 file system 並且串接 VFS 介面，讓 FUSE 可以成功掛載 image 成 disk 
+在這個專案中，使用 python 建立 file system 並且串接 VFS 介面，利用 FUSE 可以成功掛載 image 成 disk 
 
 ### 第一階段
-1. 建立 SuperBlock，類似其他 file system header file 功能，裡面含有 patition 資訊
-2. 建立 Inode Table，類似其他 file system metadata 功能，紀錄當前資料的資訊以及實體 offset，就是 LBA
+1. 建立 SuperBlock，裡面含有 patition 資訊
+2. 建立 Inode Table，紀錄當前資料的資訊以及實體 offset，就是 LBA
 3. 建立 Bitmap，紀錄哪些實體位置可以使用
 
 ### 第二階段
