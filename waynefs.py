@@ -225,8 +225,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", default="waynefs.img")
     ap.add_argument("--mountpoint", default="mrt")
+    ap.add_argument("--foreground", default=False)
+    ap.add_argument("--debug", default=False)
     args = ap.parse_args()
-    FUSE(WayneFS(args.image), args.mountpoint, foreground=True, debug=True)
+    FUSE(WayneFS(args.image), args.mountpoint, foreground=args.foreground, debug=args.debug)
 
 if __name__ == "__main__":
     main()
