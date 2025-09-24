@@ -88,19 +88,19 @@ else
     exit 1
 fi
 
-#rm -f $TEST_DIR/._* 
-#rmdir $TEST_SUB_DIR
+rm -f $TEST_DIR/._* 
+rmdir $TEST_SUB_DIR
 
-#OUTPUT=$(ls -la $TEST_DIR)
+OUTPUT=$(ls -la $TEST_DIR)
 
 # 驗證目錄是否存在
-#if [ ! -d "$TEST_SUB_DIR" ] && echo "$OUTPUT" | grep -q " \.$" && echo "$OUTPUT" | grep -q " \.\.$" && ! echo "$OUTPUT" | grep -q $SUB_DIR"$"; then
-#    echo -e "${GREEN}✅ 測試通過：$TEST_SUB_DIR 已刪除${NC}"
-#else
-#    echo -e "${RED}❌ 測試失敗：$TEST_SUB_DIR 沒有刪除${NC}"
-#    kill $PID
-#    exit 1
-#fi
+if [ ! -d "$TEST_SUB_DIR" ] && echo "$OUTPUT" | grep -q " \.$" && echo "$OUTPUT" | grep -q " \.\.$" && ! echo "$OUTPUT" | grep -q $SUB_DIR"$"; then
+    echo -e "${GREEN}✅ 測試通過：$TEST_SUB_DIR 已刪除${NC}"
+    echo "$OUTPUT"
+else
+    echo -e "${RED}❌ 測試失敗：$TEST_SUB_DIR 沒有刪除${NC}"
+    exit 1
+fi
 
 
 echo "=== 測試 create 與 open ==="
@@ -143,13 +143,13 @@ cat $TEST_FILE > /dev/null
 echo -e "${GREEN}✅ 測試通過：open - 成功開啟並讀取空檔案${NC}"
 
 # 測試後清理
-#rm $TEST_FILE
-#if [ ! -f "$TEST_FILE" ]; then
-#    echo -e "${GREEN}✅ 測試通過：檔案已成功刪除${NC}"
-#else
-#    echo -e "${RED}❌ 測試失敗：檔案刪除失敗${NC}"
-#    exit 1
-#fi
+rm $TEST_FILE
+if [ ! -f "$TEST_FILE" ]; then
+    echo -e "${GREEN}✅ 測試通過：檔案已成功刪除${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：檔案刪除失敗${NC}"
+    exit 1
+fi
 
 echo "=== 測試 write 與 read ==="
 WRITE_FILE=$MNT/rw_test.txt
@@ -185,6 +185,5 @@ fi
 rm "$WRITE_FILE"
 echo -e "${GREEN}✅ 測試通過：讀寫測試檔案已刪除${NC}"
 
-finalize
 # 清理
 echo "=== 測試結束 ==="
