@@ -163,11 +163,17 @@ class InodeTable:
     def __inode_offset(self, idx: int) -> int:
         return self.sb.inode_table_start * self.sb.block_size + idx * self.inode_size
 
-    def read(self, idx: int) -> Inode:
-        off = self.__inode_offset(idx)
+    def read(self, ino: int) -> Inode:
+        off = self.__inode_offset(ino)
         raw = self.disk.read_at(off, self.inode_size)
         return Inode.unpack(raw)
 
-    def write(self, idx: int, inode: Inode):
-        off = self.__inode_offset(idx)
+    def write(self, ino: int, inode: Inode):
+        off = self.__inode_offset(ino)
         self.disk.write_at(off, inode.pack())    
+
+@dataclass
+class OpenFileState:
+    ino: int
+    flags: int
+    offset: int
