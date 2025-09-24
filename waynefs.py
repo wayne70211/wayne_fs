@@ -349,6 +349,50 @@ class WayneFS(LoggingMixIn, Operations):
 
 
         return bytes(data)
+    
+    def unlink(self, path):
+        parent_path, _ = self._split(path)
+        parent_ino = self._lookup(parent_path)
+        parent_inode = self._iget(parent_ino)
+
+        curr_ino = self._lookup(path)
+        curr_inode = self._iget(curr_ino)
+
+        old_parent_entries = self._read_dir_entries(parent_inode)
+        new_parent_entries = []
+        for child_ino, child_name in old_parent_entries:
+            if child_ino == curr_ino:
+                continue
+            new_parent_entries.append((child_ino, child_name))
+
+        assert len(old_parent_entries) == len(new_parent_entries) + 1
+
+        # write back entries of parent
+        self._write_dir_entries(parent_inode, new_parent_entries)
+        if curr_inode.mode == InodeMode.S_IFDIR:
+            raise OSError(errno.EISDIR, "Is a directory")
+
+        curr_inode.nlink -= 1
+
+        if curr_inode.nlink == 0:
+            # Remove all block and set free
+            for block_no in curr_inode.direct:
+                if block_no != 0:
+                    self._free_block(block_no)
+            self._free_inode(curr_ino)
+        else:
+            self.inode_table.write(curr_ino, curr_inode)
+
+        parent_inode.mtime = parent_inode.ctime = int(time.time())
+        # write back of parent inode to inode table
+        self.inode_table.write(parent_ino, parent_inode)
+
+        
+        self.bitmap.flush()
+        self.disk.fsync()
+
+
+
 
 def main():
     ap = argparse.ArgumentParser()
