@@ -171,3 +171,9 @@ class InodeTable:
     def write(self, idx: int, inode: Inode):
         off = self.__inode_offset(idx)
         self.disk.write_at(off, inode.pack())    
+
+@dataclass
+class OpenFileState:
+    ino: int
+    flags: int
+    offset: int

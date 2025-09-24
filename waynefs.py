@@ -3,7 +3,7 @@ import os, errno, time, argparse
 from fuse import FUSE, Operations, LoggingMixIn
 from disk import Disk
 from bitmap import BlockBitmap
-from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable
+from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -17,6 +17,10 @@ class WayneFS(LoggingMixIn, Operations):
         self.bitmap = BlockBitmap(self.disk, self.sb)
         self.inode_table = InodeTable(self.disk, self.sb)
         self.start = time.time()
+
+        # Open File Table
+        self.open_file_table = {} # {file_handle (int): info}
+        self.next_fh = 0
 
     # --- helpers ---
     def _iget(self, ino: int) -> Inode:
@@ -141,10 +145,8 @@ class WayneFS(LoggingMixIn, Operations):
     
     def mkdir(self, path, mode: int):
         parent_path, curr_dir_name = self._split(path)
-        print("mkdir path1 = ", path, "parent path = ", parent_path, "curr_dir_name", curr_dir_name)
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
-        print("mkdir path = ", path, "mode = ", parent_inode.mode, "parent path = ", parent_path, "curr_dir_name", curr_dir_name)
         if parent_inode.mode != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
@@ -220,6 +222,46 @@ class WayneFS(LoggingMixIn, Operations):
         
         self.bitmap.flush()
         self.disk.fsync()
+
+    def open(self, path, flags):
+        # Check file existed and get file ino
+        ino = self._lookup(path)
+        curr_fh = self.next_fh
+        self.next_fh += 1
+        self.open_file_table[curr_fh] = OpenFileState(ino, flags, 0)
+        return curr_fh
+    
+    def create(self, path, mode):
+        parent_path, curr_file_name = self._split(path)
+
+        parent_ino = self._lookup(parent_path)
+        parent_inode = self._iget(parent_ino)
+        if parent_inode.mode != InodeMode.S_IFDIR:
+            raise OSError(errno.ENOENT, "No such directory") 
+        
+        # check the curr_dir_name not in parent_inode entries
+        parent_entries = self._read_dir_entries(parent_inode)
+        for _, child_name in parent_entries:
+            if child_name == curr_file_name:
+                raise OSError(errno.EEXIST, "File is existed") 
+        
+        child_ino = self._alloc_inode()
+        child_inode = Inode.empty(mode=(InodeMode.S_IFREG | mode))
+        child_inode.nlink = 1
+        child_inode.size = 0
+        self.inode_table.write(child_ino, child_inode)
+
+        parent_entries.append((child_ino, curr_file_name))
+        self._write_dir_entries(parent_inode, parent_entries)
+        parent_inode.ctime = parent_inode.mtime = child_inode.ctime
+        self.inode_table.write(parent_ino, parent_inode)
+
+        self.disk.fsync()
+
+        curr_fh = self.next_fh
+        self.next_fh += 1
+        self.open_file_table[curr_fh] = OpenFileState(child_ino, mode, 0)
+        return curr_fh
 
 def main():
     ap = argparse.ArgumentParser()
