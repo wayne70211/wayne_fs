@@ -47,7 +47,6 @@ class Inode:
 
     def pack(self) -> bytearray:
         data = bytearray()
-        print("atime", self.atime)
         data += struct.pack("<I", self.mode) 
         data += struct.pack("<I", self.nlink)
         data += struct.pack("<Q", self.size)

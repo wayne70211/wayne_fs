@@ -69,7 +69,6 @@ def make_image(path, size_mb, block_size, inode_count):
 
         # inode table init
         f.seek(inode_table_start * block_size)
-        print(inode_table_start * block_size)
         f.write(b"\x00" * (inode_blocks * block_size))
 
 
