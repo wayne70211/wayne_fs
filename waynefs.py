@@ -5,7 +5,7 @@ from disk import Disk
 from bitmap import BlockBitmap
 from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 ROOT_INO = 0 
 INODE_SIZE = 128
@@ -19,7 +19,7 @@ class WayneFS(LoggingMixIn, Operations):
         self.start = time.time()
 
         # Open File Table
-        self.open_file_table = {} # {file_handle (int): info}
+        self.open_file_table: Dict[int, OpenFileState] = {}  # {fh(int): OpenFileState}
         self.next_fh = 0
 
     # --- helpers ---
@@ -262,6 +262,93 @@ class WayneFS(LoggingMixIn, Operations):
         self.next_fh += 1
         self.open_file_table[curr_fh] = OpenFileState(child_ino, mode, 0)
         return curr_fh
+    
+    def write(self, path, data, offset, fh):
+        if fh not in self.open_file_table:
+            raise OSError(errno.EBADF, "Bad file descriptor")
+    
+        curr_file_state = self.open_file_table[fh]
+        curr_inode = self._iget(curr_file_state.ino)
+
+        length = len(data)
+        if length == 0:
+            return 0
+        
+        start_block_idx = offset // self.sb.block_size
+        end_block_idx = (offset + length - 1) // self.sb.block_size
+
+        # Check file size constrain (12 direct link)
+        if end_block_idx >= len(curr_inode.direct):
+            raise OSError(errno.EFBIG, "File too large")
+        
+        # Generate the link from inode direct to disk offset 
+        for curr_block_idx in range(start_block_idx, end_block_idx+1):
+            if curr_inode.direct[curr_block_idx] == 0:
+                proc_block_addr = self._alloc_block()
+                curr_inode.direct[curr_block_idx] = proc_block_addr
+
+
+        data_cursor = 0
+        # Write buffer
+        for curr_block_idx in range(start_block_idx, end_block_idx+1):
+
+            curr_start_offset = offset % self.sb.block_size if curr_block_idx == start_block_idx else 0
+            curr_end_offset = (offset + length - 1) % self.sb.block_size + 1 if curr_block_idx == end_block_idx else self.sb.block_size
+
+            is_partial_write = curr_start_offset != 0 or curr_end_offset != self.sb.block_size
+
+            if is_partial_write:
+                curr_block = bytearray(self.disk.read_block(curr_inode.direct[curr_block_idx]))
+            else:
+                curr_block = bytearray(self.sb.block_size)
+
+            need_write_data_len = curr_end_offset - curr_start_offset
+            curr_block[curr_start_offset: curr_end_offset] = data[data_cursor:data_cursor+need_write_data_len]
+            data_cursor += need_write_data_len
+
+            self.disk.write_block(curr_inode.direct[curr_block_idx], bytes(curr_block))
+
+
+        curr_inode.size = max(curr_inode.size, offset+length)
+        curr_inode.mtime = int(time.time())
+        self.inode_table.write(curr_file_state.ino, curr_inode)
+
+        return length
+    
+    def read(self, path, size, offset, fh):
+        if fh not in self.open_file_table:
+            raise OSError(errno.EBADF, "Bad file descriptor")
+    
+        curr_file_state = self.open_file_table[fh]
+        curr_inode = self._iget(curr_file_state.ino)
+
+        if offset >= curr_inode.size:
+            return b""
+        
+        size = min(size, curr_inode.size - offset)
+        if size == 0:
+            return b""
+
+        start_block_idx = offset // self.sb.block_size
+        end_block_idx = (offset + size - 1) // self.sb.block_size
+
+        data = bytearray(size)
+
+        data_cursor = 0
+
+        # Read buffer
+        for curr_block_idx in range(start_block_idx, end_block_idx+1):
+
+            curr_start_offset = offset % self.sb.block_size if curr_block_idx == start_block_idx else 0
+            curr_end_offset = (offset + size - 1) % self.sb.block_size + 1 if curr_block_idx == end_block_idx else self.sb.block_size
+
+            curr_block = self.disk.read_block(curr_inode.direct[curr_block_idx])
+            need_read_data_len = curr_end_offset - curr_start_offset
+            data[data_cursor:data_cursor+need_read_data_len] = curr_block[curr_start_offset: curr_end_offset]
+            data_cursor += need_read_data_len
+
+
+        return bytes(data)
 
 def main():
     ap = argparse.ArgumentParser()
