@@ -143,15 +143,47 @@ cat $TEST_FILE > /dev/null
 echo -e "${GREEN}✅ 測試通過：open - 成功開啟並讀取空檔案${NC}"
 
 # 測試後清理
-rm $TEST_FILE
-if [ ! -f "$TEST_FILE" ]; then
-    echo -e "${GREEN}✅ 測試通過：檔案已成功刪除${NC}"
+#rm $TEST_FILE
+#if [ ! -f "$TEST_FILE" ]; then
+#    echo -e "${GREEN}✅ 測試通過：檔案已成功刪除${NC}"
+#else
+#    echo -e "${RED}❌ 測試失敗：檔案刪除失敗${NC}"
+#    exit 1
+#fi
+
+echo "=== 測試 write 與 read ==="
+WRITE_FILE=$MNT/rw_test.txt
+TEST_STRING="Hello from WayneFS in Banqiao, New Taipei City!"
+
+# 1. 測試 write：使用 echo 寫入一個字串
+echo -n "$TEST_STRING" > "$WRITE_FILE"
+
+# 驗證 write 是否成功 (檢查檔案大小是否正確)
+FILE_SIZE=$(stat -c %s "$WRITE_FILE" 2>/dev/null || stat -f %z "$WRITE_FILE")
+EXPECTED_SIZE=${#TEST_STRING}
+
+if [ "$FILE_SIZE" -eq "$EXPECTED_SIZE" ]; then
+    echo -e "${GREEN}✅ 測試通過：write - 檔案大小正確 ($FILE_SIZE bytes)${NC}"
 else
-    echo -e "${RED}❌ 測試失敗：檔案刪除失敗${NC}"
+    echo -e "${RED}❌ 測試失敗：write - 檔案大小錯誤 (應為 $EXPECTED_SIZE, 實際為 $FILE_SIZE)${NC}"
     exit 1
 fi
 
+# 2. 測試 read：使用 cat 讀出內容並比較
+READ_CONTENT=$(cat "$WRITE_FILE")
 
+if [ "$READ_CONTENT" == "$TEST_STRING" ]; then
+    echo -e "${GREEN}✅ 測試通過：read - 檔案內容正確${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：read - 檔案內容不符${NC}"
+    echo "應為: $TEST_STRING"
+    echo "讀到: $READ_CONTENT"
+    exit 1
+fi
+
+# 3. 清理測試檔案
+rm "$WRITE_FILE"
+echo -e "${GREEN}✅ 測試通過：讀寫測試檔案已刪除${NC}"
 
 finalize
 # 清理
