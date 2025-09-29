@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 import os, struct, argparse, math, sys, time
-from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable
+from layout import MAGIC, SB_FMT, SB_SIZE, INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable
 from disk import Disk
-from bitmap import BlockBitmap
+from bitmap import InodeBitmap, BlockBitmap
 
-MAGIC = b"WAYNE_FS"
-SB_FMT = "<8sIIIIIIIII"  # magic + 9 uint32
-SB_SIZE = struct.calcsize(SB_FMT)
-INODE_SIZE = 128
 ROOT_INO = 0 
 
 def ceil_div(a, b): return (a + b - 1) // b
@@ -21,10 +17,15 @@ def make_image(path, size_mb, block_size, inode_count):
     # [0] superblock (1 block)
     sb_blocks = 1
 
-    # Free-space bitmap: 1 bit per block
-    bitmap_bits = total_blocks
-    bitmap_bytes = ceil_div(bitmap_bits, 8)
-    bitmap_blocks = ceil_div(bitmap_bytes, block_size)
+    # <<< NEW: Inode Bitmap Calculation >>>
+    inode_bitmap_bits = inode_count
+    inode_bitmap_bytes = ceil_div(inode_bitmap_bits, 8)
+    inode_bitmap_blocks = ceil_div(inode_bitmap_bytes, block_size)
+
+    # Block Bitmap calculation (unchanged)
+    block_bitmap_bits = total_blocks
+    block_bitmap_bytes = ceil_div(block_bitmap_bits, 8)
+    block_bitmap_blocks = ceil_div(block_bitmap_bytes, block_size)
 
     # inode table: fixed inode size (128B)
     INODE_SIZE = 128
@@ -32,8 +33,9 @@ def make_image(path, size_mb, block_size, inode_count):
     inode_blocks = ceil_div(inode_bytes, block_size)
 
     # Data region starts after sb + bitmap + inodes
-    free_bitmap_start = 1  # block index after superblock
-    inode_table_start  = free_bitmap_start + bitmap_blocks
+    inode_bitmap_start = sb_blocks
+    block_bitmap_start = inode_bitmap_start + inode_bitmap_blocks
+    inode_table_start  = block_bitmap_start + block_bitmap_blocks
     data_start         = inode_table_start + inode_blocks
 
     if data_start >= total_blocks:
@@ -51,31 +53,32 @@ def make_image(path, size_mb, block_size, inode_count):
             block_size,
             total_blocks,
             inode_count,
-            free_bitmap_start,
-            bitmap_blocks,
+            inode_bitmap_start,
+            inode_bitmap_blocks,
+            block_bitmap_start,
+            block_bitmap_blocks,
             inode_table_start,
             inode_blocks,
             data_start,
             0,  # reserved
         )
-        # pad to full block
         f.seek(0)
         f.write(sb)
         f.write(b"\x00" * (block_size - SB_SIZE))
 
-        # Zero bitmap + inode table region explicitly (optional, but clear)
-        f.seek(free_bitmap_start * block_size)
-        f.write(b"\x00" * (bitmap_blocks * block_size))
+        f.seek(inode_bitmap_start * block_size)
+        f.write(b"\x00" * (inode_bitmap_blocks * block_size))
 
-        # inode table init
+        f.seek(block_bitmap_start * block_size)
+        f.write(b"\x00" * (block_bitmap_blocks * block_size))
         f.seek(inode_table_start * block_size)
-        print(inode_table_start * block_size)
         f.write(b"\x00" * (inode_blocks * block_size))
 
 
     disk = Disk(path)
     sb = Superblock.load(disk)
-    bitmap = BlockBitmap(disk, sb)
+    inode_bitmap = InodeBitmap(disk, sb) 
+    block_bitmap = BlockBitmap(disk, sb)
     inode_table = InodeTable(disk, sb)
 
     # write first two node in data start
@@ -91,18 +94,21 @@ def make_image(path, size_mb, block_size, inode_count):
     root_inode.direct[0] = sb.data_start
     inode_table.write(ROOT_INO, root_inode)
 
+    inode_bitmap.set_used(ROOT_INO)
+    inode_bitmap.flush()
+
     # update the valid bitmap
     # set used for all blk before data_start 
-    for ino in range(root_blk):
-        bitmap.set_used(ino)
+    for ino in range(root_blk + 1):
+        block_bitmap.set_used(ino)
     # set root data is used
-    bitmap.set_used(root_blk)
-    bitmap.flush()
+    block_bitmap.flush()
     disk.fsync()
 
     print(f"Created image: {path}")
     print(f"  size_mb={size_mb}, block_size={block_size}, total_blocks={total_blocks}")
-    print(f"  free_bitmap_start={free_bitmap_start} blocks={bitmap_blocks}")
+    print(f"  inode_bitmap_start={inode_bitmap_start} blocks={inode_bitmap_blocks}")
+    print(f"  block_bitmap_start={block_bitmap_start} blocks={block_bitmap_blocks}")
     print(f"  inode_table_start={inode_table_start} blocks={inode_blocks}")
     print(f"  data_start={data_start}")
 
