@@ -3,12 +3,11 @@ import os, errno, time, argparse
 from fuse import FUSE, Operations, LoggingMixIn
 from disk import Disk
 from bitmap import InodeBitmap, BlockBitmap
-from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState
+from layout import INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState
 from dataclasses import dataclass
 from typing import List, Tuple, Dict
 
 ROOT_INO = 0 
-INODE_SIZE = 128
 
 class WayneFS(LoggingMixIn, Operations):
     def __init__(self, image_path):
@@ -181,6 +180,7 @@ class WayneFS(LoggingMixIn, Operations):
         self.inode_table.write(parent_ino, parent_inode)
 
         self.block_bitmap.flush()
+        self.inode_bitmap.flush()
         self.disk.fsync()
 
 
@@ -223,6 +223,7 @@ class WayneFS(LoggingMixIn, Operations):
         self.inode_table.write(parent_ino, parent_inode)
         
         self.block_bitmap.flush()
+        self.inode_bitmap.flush()
         self.disk.fsync()
 
     def open(self, path, flags):
@@ -258,6 +259,7 @@ class WayneFS(LoggingMixIn, Operations):
         parent_inode.ctime = parent_inode.mtime = child_inode.ctime
         self.inode_table.write(parent_ino, parent_inode)
 
+        self.inode_bitmap.flush()
         self.disk.fsync()
 
         curr_fh = self.next_fh
@@ -314,6 +316,7 @@ class WayneFS(LoggingMixIn, Operations):
         curr_inode.size = max(curr_inode.size, offset+length)
         curr_inode.mtime = int(time.time())
         self.inode_table.write(curr_file_state.ino, curr_inode)
+        self.block_bitmap.flush()
 
         return length
     
@@ -391,6 +394,7 @@ class WayneFS(LoggingMixIn, Operations):
 
         
         self.block_bitmap.flush()
+        self.inode_bitmap.flush()
         self.disk.fsync()
 
 
