@@ -8,7 +8,7 @@ import time
 
 
 MAGIC = b"WAYNE_FS"
-SB_FMT = "<8sIIIIIIIII"
+SB_FMT = "<8sIIIIIIIIIII"
 SB_SIZE = struct.calcsize(SB_FMT)
 INODE_SIZE = 128
 
@@ -83,13 +83,20 @@ class Inode:
 
 @dataclass
 class Superblock:
+    magic: int
     block_size: int
     total_blocks: int
     inode_count: int
-    free_bitmap_start: int
-    free_bitmap_blocks: int
+    # --- Inode BMP ---
+    inode_bitmap_start: int
+    inode_bitmap_blocks: int
+    # --- Block BMP ---
+    block_bitmap_start: int
+    block_bitmap_blocks: int
+    # --- Inode Table ---
     inode_table_start: int
     inode_table_blocks: int
+    # --- Data ---
     data_start: int
 
     @classmethod
@@ -99,23 +106,25 @@ class Superblock:
         magic = fields[0]
         if magic != MAGIC:
             raise RuntimeError("Bad superblock magic; did you run mktoyfs.py?")
-        ( _magic,
+        ( magic,
           block_size,
           total_blocks,
           inode_count,
-          free_bitmap_start,
-          free_bitmap_blocks,
+          inode_bitmap_start,
+          inode_bitmap_blocks,
+          block_bitmap_start,
+          block_bitmap_blocks,
           inode_table_start,
           inode_table_blocks,
           data_start,
           _reserved) = fields
         disk.block_size = block_size  # sync disk view
-        return cls(block_size, total_blocks, inode_count,
-                   free_bitmap_start, free_bitmap_blocks,
+        return cls(magic, block_size, total_blocks, inode_count,
+                   inode_bitmap_start, inode_bitmap_blocks,
+                   block_bitmap_start, block_bitmap_blocks,
                    inode_table_start, inode_table_blocks,
                    data_start)
       
-
 class DictEnDecoder:
   def pack_dir(entries):
       """

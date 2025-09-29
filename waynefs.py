@@ -2,7 +2,7 @@
 import os, errno, time, argparse
 from fuse import FUSE, Operations, LoggingMixIn
 from disk import Disk
-from bitmap import BlockBitmap
+from bitmap import InodeBitmap, BlockBitmap
 from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState
 from dataclasses import dataclass
 from typing import List, Tuple, Dict
@@ -14,7 +14,8 @@ class WayneFS(LoggingMixIn, Operations):
     def __init__(self, image_path):
         self.disk = Disk(image_path)
         self.sb = Superblock.load(self.disk)
-        self.bitmap = BlockBitmap(self.disk, self.sb)
+        self.inode_bitmap = InodeBitmap(self.disk, self.sb)
+        self.block_bitmap = BlockBitmap(self.disk, self.sb)
         self.inode_table = InodeTable(self.disk, self.sb)
         self.start = time.time()
 
@@ -51,24 +52,25 @@ class WayneFS(LoggingMixIn, Operations):
 
     def _alloc_inode(self):
         # loop from 1, not 0 due to inode 0 is root
-        for ino in range(1, self.sb.inode_count):
-            if self._iget(ino).mode == InodeMode.S_INIT:
-                return ino
-        raise OSError(errno.ENOSPC, "No free inode") 
-    
+        ino = self.inode_bitmap.find_free_inode(1)
+        if ino < 0:
+            raise OSError(errno.ENOSPC, "No free inode") 
+        self.inode_bitmap.set_used(ino)
+        return ino
+        
     def _free_inode(self, ino: int):
-        self.inode_table.write(ino, Inode.empty(mode=InodeMode.S_INIT))
+        self.inode_bitmap.clear_used(ino)
         return
     
     def _alloc_block(self):
-        blk_idx = self.bitmap.find_free_block(self.sb.data_start)
+        blk_idx = self.block_bitmap.find_free_block(self.sb.data_start)
         if blk_idx < 0:
             raise OSError(errno.ENOSPC, "No free inode") 
-        self.bitmap.set_used(blk_idx)
+        self.block_bitmap.set_used(blk_idx)
         return blk_idx
     
     def _free_block(self, blk_idx: int):
-        self.bitmap.clear_used(blk_idx)
+        self.block_bitmap.clear_used(blk_idx)
         return
 
     def _lookup(self, path: str): 
@@ -178,7 +180,7 @@ class WayneFS(LoggingMixIn, Operations):
         parent_inode.ctime = parent_inode.mtime = child_inode.ctime
         self.inode_table.write(parent_ino, parent_inode)
 
-        self.bitmap.flush()
+        self.block_bitmap.flush()
         self.disk.fsync()
 
 
@@ -220,7 +222,7 @@ class WayneFS(LoggingMixIn, Operations):
         # write back of parent inode to inode table
         self.inode_table.write(parent_ino, parent_inode)
         
-        self.bitmap.flush()
+        self.block_bitmap.flush()
         self.disk.fsync()
 
     def open(self, path, flags):
@@ -388,7 +390,7 @@ class WayneFS(LoggingMixIn, Operations):
         self.inode_table.write(parent_ino, parent_inode)
 
         
-        self.bitmap.flush()
+        self.block_bitmap.flush()
         self.disk.fsync()
 
 
