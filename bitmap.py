@@ -67,8 +67,8 @@ class BlockBitmap(Bitmap):
     def find_free_block(self, start_idx: int = 0) -> int:
         return self.find_free_entry(max(1, start_idx))
     
-    def set_used(self, ino: int):
-        self.set(ino)
+    def set_used(self, blk_idx: int):
+        self.set(blk_idx)
 
-    def clear_used(self, ino: int):
-        self.clear(ino)
+    def clear_used(self, blk_idx: int):
+        self.clear(blk_idx)
