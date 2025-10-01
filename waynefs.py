@@ -488,7 +488,20 @@ class WayneFS(LoggingMixIn, Operations):
         self.disk.fsync()
     
     def utimens(self, path, times=None):
-        return
+        ino = self._lookup(path)
+        inode = self._iget(ino)
+
+        if times == None:
+            now = time.time()
+            times = (now, now)
+
+        inode.atime = int(times[0])
+        inode.mtime = int(times[1])
+        inode.ctime = int(time.time())
+        self.inode_table.write(ino, inode)
+
+        return 0
+
     
 
 def main():
