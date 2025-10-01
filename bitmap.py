@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# Minimal bitmap helper (bytearray-based). You will extend this later.
 from disk import Disk
 from layout import Superblock
 
