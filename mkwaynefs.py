@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 import os, struct, argparse, math, sys, time
-from layout import MAGIC, SB_FMT, SB_SIZE, INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable
+from layout import MAGIC, SB_FMT, SB_SIZE, INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, ceil_div
 from disk import Disk
 from bitmap import InodeBitmap, BlockBitmap
 
 ROOT_INO = 0 
-
-def ceil_div(a, b): return (a + b - 1) // b
 
 def make_image(path, size_mb, block_size, inode_count):
     total_blocks = (size_mb * 1024 * 1024) // block_size
