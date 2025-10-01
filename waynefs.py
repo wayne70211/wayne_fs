@@ -3,7 +3,7 @@ import os, errno, time, argparse
 from fuse import FUSE, Operations, LoggingMixIn
 from disk import Disk
 from bitmap import InodeBitmap, BlockBitmap
-from layout import INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState
+from layout import INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState, ceil_div
 from dataclasses import dataclass
 from typing import List, Tuple, Dict
 
@@ -395,9 +395,101 @@ class WayneFS(LoggingMixIn, Operations):
         self.block_bitmap.flush()
         self.inode_bitmap.flush()
         self.disk.fsync()
+    
+    def truncate(self, path, length, fh=None):
+        ino = self._lookup(path)
+        inode = self._iget(ino)
 
+        original_blks = ceil_div(inode.size, self.sb.block_size)
+        need_blks = ceil_div(length, self.sb.block_size)
 
+        # extend
+        if length > inode.size:
+            if need_blks > len(inode.direct):
+                raise OSError(errno.EFBIG, "File too large for direct blocks")
+            
+            for i in range(original_blks, need_blks):
+                if inode.direct[i] == 0:
+                    new_blk = self._alloc_block()
+                    inode.direct[i] = new_blk
 
+                    # write all 0 into new_blk
+                    self.disk.write_block(new_blk,  b'\x00' * self.sb.block_size)
+                    
+        else:
+            for i in range(need_blks + 1, original_blks):
+                if inode.direct[i] != 0:
+                    self._free_block(inode.direct[i])
+                    inode.direct[i] = 0
+
+        inode.size = length
+        inode.mtime = inode.ctime = int(time.time())
+        self.inode_table.write(ino, inode)
+        self.block_bitmap.flush()
+    
+    def rename(self, old, new):
+        if old == new:
+            return
+
+        old_parent_path, old_name = self._split(old)
+        old_parent_ino = self._lookup(old_parent_path)
+        old_parent_inode = self._iget(old_parent_ino)
+
+        new_parent_path, new_name = self._split(new)
+        new_parent_ino = self._lookup(new_parent_path)
+        new_parent_inode = self._iget(new_parent_ino)
+
+        if old_parent_inode.mode != InodeMode.S_IFDIR:
+            raise OSError(errno.ENOENT, "No such directory") 
+        
+        if new_parent_inode.mode != InodeMode.S_IFDIR:
+            raise OSError(errno.ENOENT, "No such directory") 
+        
+        old_parent_dentry = self._read_dir_entries(old_parent_inode)
+        curr_ino = None
+        for ino, name in old_parent_dentry:
+            if name == old_name:
+                curr_ino = ino
+                break
+        
+        if curr_ino is None:
+            raise OSError(errno.ENOENT, "Source path does not exist")
+        
+        curr_inode = self._iget(curr_ino)
+
+        old_parent_dentry = [entry for entry in old_parent_dentry if entry[0] != curr_ino]
+        self._write_dir_entries(old_parent_inode, old_parent_dentry)
+
+        new_parent_dentry = self._read_dir_entries(new_parent_inode)
+        new_parent_dentry.append((curr_ino, new_name))
+
+        if curr_inode.mode == InodeMode.S_IFDIR:
+            if old_parent_ino != new_parent_ino:
+                old_parent_inode.nlink -= 1
+                new_parent_inode.nlink += 1
+                curr_inode_dentry = self._read_dir_entries(curr_inode)
+                curr_inode_dentry.remove((old_parent_ino, ".."))
+                curr_inode_dentry.append((new_parent_ino, ".."))
+                self._write_dir_entries(curr_inode, curr_inode_dentry)
+        
+        # Write old and new parent d-entry
+        self._write_dir_entries(old_parent_inode, old_parent_dentry)
+        self._write_dir_entries(new_parent_inode, new_parent_dentry)
+
+        current_time = int(time.time())
+        old_parent_inode.mtime = old_parent_inode.ctime = current_time
+        new_parent_inode.mtime = new_parent_inode.ctime = current_time
+        curr_inode.ctime = current_time
+
+        # Update Inode Table
+        self.inode_table.write(old_parent_ino, old_parent_inode)
+        self.inode_table.write(new_parent_ino, new_parent_inode)
+        self.inode_table.write(curr_ino, curr_inode)
+        self.disk.fsync()
+    
+    def utimens(self, path, times=None):
+        return
+    
 
 def main():
     ap = argparse.ArgumentParser()
