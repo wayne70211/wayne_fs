@@ -185,3 +185,5 @@ class OpenFileState:
     ino: int
     flags: int
     offset: int
+
+def ceil_div(a, b): return (a + b - 1) // b
