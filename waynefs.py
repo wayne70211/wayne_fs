@@ -64,7 +64,7 @@ class WayneFS(LoggingMixIn, Operations):
     def _alloc_block(self):
         blk_idx = self.block_bitmap.find_free_block(self.sb.data_start)
         if blk_idx < 0:
-            raise OSError(errno.ENOSPC, "No free inode") 
+            raise OSError(errno.ENOSPC, "No free block") 
         self.block_bitmap.set_used(blk_idx)
         return blk_idx
     
@@ -78,7 +78,6 @@ class WayneFS(LoggingMixIn, Operations):
         
         all_path = [seg for seg in path.split("/") if seg]     
         curr_ino = ROOT_INO
-        print("_lookup", all_path)
         for name in all_path:
             if name == ".":
                 continue

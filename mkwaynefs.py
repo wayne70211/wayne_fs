@@ -13,22 +13,19 @@ def make_image(path, size_mb, block_size, inode_count):
     if total_blocks < 1024:
         raise SystemExit("Image too small; give at least ~4MB")
 
-    # Layout planning (very simple & static-ish for starter)
-    # [0] superblock (1 block)
     sb_blocks = 1
 
-    # <<< NEW: Inode Bitmap Calculation >>>
+    # Inode Bitmap Calculation
     inode_bitmap_bits = inode_count
     inode_bitmap_bytes = ceil_div(inode_bitmap_bits, 8)
     inode_bitmap_blocks = ceil_div(inode_bitmap_bytes, block_size)
 
-    # Block Bitmap calculation (unchanged)
+    # Block Bitmap calculation
     block_bitmap_bits = total_blocks
     block_bitmap_bytes = ceil_div(block_bitmap_bits, 8)
     block_bitmap_blocks = ceil_div(block_bitmap_bytes, block_size)
 
     # inode table: fixed inode size (128B)
-    INODE_SIZE = 128
     inode_bytes = inode_count * INODE_SIZE
     inode_blocks = ceil_div(inode_bytes, block_size)
 
