@@ -118,11 +118,11 @@ class WayneFS(LoggingMixIn, Operations):
         all_path = [seg for seg in path.split("/") if seg]
 
         return "/".join(all_path[:-1]),all_path[-1]
-    # --- FUSE ops ---
+    # --- FUSE ops ---    
     def getattr(self, path, fh=None):
         curr_ino = self._lookup(path)
         curr_inode = self._iget(curr_ino)
-        print("getattr", path, "->", curr_inode.mode, curr_inode.nlink, curr_inode.size)
+        print("getattr", path, "->", curr_ino, curr_inode.mode, curr_inode.nlink, curr_inode.size)
         return {
                 "st_mode" : curr_inode.mode,
                 "st_nlink": curr_inode.nlink,
@@ -130,6 +130,7 @@ class WayneFS(LoggingMixIn, Operations):
                 "st_ctime": curr_inode.ctime,
                 "st_mtime": curr_inode.mtime,
                 "st_atime": curr_inode.atime,
+                "st_ino": curr_ino,
             }
 
     def readdir(self, path, fh):
@@ -355,7 +356,7 @@ class WayneFS(LoggingMixIn, Operations):
         return bytes(data)
     
     def unlink(self, path):
-        parent_path, _ = self._split(path)
+        parent_path, curr_name = self._split(path)
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
 
@@ -365,7 +366,7 @@ class WayneFS(LoggingMixIn, Operations):
         old_parent_entries = self._read_dir_entries(parent_inode)
         new_parent_entries = []
         for child_ino, child_name in old_parent_entries:
-            if child_ino == curr_ino:
+            if child_name == curr_name:
                 continue
             new_parent_entries.append((child_ino, child_name))
 
@@ -510,6 +511,56 @@ class WayneFS(LoggingMixIn, Operations):
         inode.ctime = int(time.time())
 
         self.inode_table.write(ino, inode)
+
+        return 0
+    
+    def link(self, target, source):
+        print(f"--- link called: source='{source}', target='{target}' ---")
+        src_parent_path, src_name = self._split(source)
+        src_parent_ino = self._lookup(src_parent_path)
+        src_parent_inode = self._iget(src_parent_ino)
+
+        curr_ino = None
+        for child_ino, child_name in self._read_dir_entries(src_parent_inode):
+            if child_name == src_name:
+                curr_ino = child_ino
+                break
+
+        if curr_ino == None:
+            raise OSError(errno.ENOENT, "Source path does not exist")
+        
+        curr_inode = self._iget(curr_ino)
+
+        if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFDIR:
+            raise OSError(errno.EPERM, "Hard link not allowed for directory")
+        
+        trg_parent_path, trg_name = self._split(target)
+        trg_parent_ino = self._lookup(trg_parent_path)
+        trg_parent_inode = self._iget(trg_parent_ino)
+
+        # Check trg_name is not existed
+        trg_dentry = self._read_dir_entries(trg_parent_inode)
+        for child_ino, child_name in trg_dentry:
+            if child_name == trg_name:
+                raise OSError(errno.EEXIST, "File is existed")
+            
+        trg_dentry.append((curr_ino, trg_name))
+        self._write_dir_entries(trg_parent_inode, trg_dentry)
+        
+        curr_time = int(time.time())
+        curr_inode.ctime = curr_time
+        curr_inode.nlink += 1
+        trg_parent_inode.ctime = trg_parent_inode.mtime = curr_time
+
+        self.inode_table.write(curr_ino, curr_inode)
+        self.inode_table.write(trg_parent_ino, trg_parent_inode)
+
+        print("link ()", source, "->" ,target)
+        print("curr_ino = ", curr_ino)
+        print("trg_dentry = ", trg_dentry)
+        print("trg_parent_ino = ", trg_parent_ino)
+
+        self.disk.fsync()
 
         return 0
 
