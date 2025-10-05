@@ -83,7 +83,7 @@ class WayneFS(LoggingMixIn, Operations):
                 continue
             elif name == "..":
                 curr_inode = self._iget(curr_ino)
-                if curr_inode.mode != InodeMode.S_IFDIR:
+                if (curr_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
                     raise OSError(errno.ENOENT, "[A] No such file or directory") 
                 parent_ino = None
                 for child_ino, child_name in self._read_dir_entries(curr_inode):
@@ -96,7 +96,7 @@ class WayneFS(LoggingMixIn, Operations):
                 curr_ino = parent_ino
             else:
                 curr_inode = self._iget(curr_ino)
-                if curr_inode.mode != InodeMode.S_IFDIR:
+                if (curr_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
                     raise OSError(errno.ENOENT, "[B] No such file or directory") 
                 next_ino = None
                 for child_ino, child_name in self._read_dir_entries(curr_inode):
@@ -118,11 +118,11 @@ class WayneFS(LoggingMixIn, Operations):
         all_path = [seg for seg in path.split("/") if seg]
 
         return "/".join(all_path[:-1]),all_path[-1]
-    # --- FUSE ops ---
+    # --- FUSE ops ---    
     def getattr(self, path, fh=None):
         curr_ino = self._lookup(path)
         curr_inode = self._iget(curr_ino)
-        print("getattr", path, "->", curr_inode.mode, curr_inode.nlink, curr_inode.size)
+        print("getattr", path, "->", curr_ino, curr_inode.mode, curr_inode.nlink, curr_inode.size)
         return {
                 "st_mode" : curr_inode.mode,
                 "st_nlink": curr_inode.nlink,
@@ -130,6 +130,7 @@ class WayneFS(LoggingMixIn, Operations):
                 "st_ctime": curr_inode.ctime,
                 "st_mtime": curr_inode.mtime,
                 "st_atime": curr_inode.atime,
+                "st_ino": curr_ino,
             }
 
     def readdir(self, path, fh):
@@ -147,7 +148,7 @@ class WayneFS(LoggingMixIn, Operations):
         parent_path, curr_dir_name = self._split(path)
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
-        if parent_inode.mode != InodeMode.S_IFDIR:
+        if (parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
         # check the curr_dir_name not in parent_inode entries
@@ -165,7 +166,7 @@ class WayneFS(LoggingMixIn, Operations):
         self.disk.write_block(child_blk, raw_data + b"\x00" * (self.sb.block_size - len(raw_data)))
         
         # Child Inode
-        child_inode = Inode.empty(mode=InodeMode.S_IFDIR)
+        child_inode = Inode.empty(mode=(InodeMode.S_IFDIR | mode))
         child_inode.nlink = 2
         child_inode.size  = len(raw_data)
         child_inode.direct[0] = child_blk
@@ -193,7 +194,7 @@ class WayneFS(LoggingMixIn, Operations):
             raise OSError(errno.EPERM, "Root directory can not be removed")
          
         curr_inode = self._iget(curr_ino)
-        if curr_inode.mode != InodeMode.S_IFDIR:
+        if (curr_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
         curr_entries = self._read_dir_entries(curr_inode)
@@ -238,7 +239,7 @@ class WayneFS(LoggingMixIn, Operations):
 
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
-        if parent_inode.mode != InodeMode.S_IFDIR:
+        if (parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
         # check the curr_dir_name not in parent_inode entries
@@ -355,7 +356,7 @@ class WayneFS(LoggingMixIn, Operations):
         return bytes(data)
     
     def unlink(self, path):
-        parent_path, _ = self._split(path)
+        parent_path, curr_name = self._split(path)
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
 
@@ -365,7 +366,7 @@ class WayneFS(LoggingMixIn, Operations):
         old_parent_entries = self._read_dir_entries(parent_inode)
         new_parent_entries = []
         for child_ino, child_name in old_parent_entries:
-            if child_ino == curr_ino:
+            if child_name == curr_name:
                 continue
             new_parent_entries.append((child_ino, child_name))
 
@@ -373,7 +374,7 @@ class WayneFS(LoggingMixIn, Operations):
 
         # write back entries of parent
         self._write_dir_entries(parent_inode, new_parent_entries)
-        if curr_inode.mode == InodeMode.S_IFDIR:
+        if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFDIR:
             raise OSError(errno.EISDIR, "Is a directory")
 
         curr_inode.nlink -= 1
@@ -439,10 +440,10 @@ class WayneFS(LoggingMixIn, Operations):
         new_parent_ino = self._lookup(new_parent_path)
         new_parent_inode = self._iget(new_parent_ino)
 
-        if old_parent_inode.mode != InodeMode.S_IFDIR:
+        if (old_parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
-        if new_parent_inode.mode != InodeMode.S_IFDIR:
+        if (new_parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
         old_parent_dentry = self._read_dir_entries(old_parent_inode)
@@ -457,13 +458,13 @@ class WayneFS(LoggingMixIn, Operations):
         
         curr_inode = self._iget(curr_ino)
 
-        old_parent_dentry = [entry for entry in old_parent_dentry if entry[0] != curr_ino]
+        old_parent_dentry = [entry for entry in old_parent_dentry if entry[1] != old_name]
         self._write_dir_entries(old_parent_inode, old_parent_dentry)
 
         new_parent_dentry = self._read_dir_entries(new_parent_inode)
         new_parent_dentry.append((curr_ino, new_name))
 
-        if curr_inode.mode == InodeMode.S_IFDIR:
+        if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFDIR:
             if old_parent_ino != new_parent_ino:
                 old_parent_inode.nlink -= 1
                 new_parent_inode.nlink += 1
@@ -488,13 +489,87 @@ class WayneFS(LoggingMixIn, Operations):
         self.disk.fsync()
     
     def utimens(self, path, times=None):
-        return
+        ino = self._lookup(path)
+        inode = self._iget(ino)
+
+        if times == None:
+            now = time.time()
+            times = (now, now)
+
+        inode.atime = int(times[0])
+        inode.mtime = int(times[1])
+        inode.ctime = int(time.time())
+        self.inode_table.write(ino, inode)
+
+        return 0
+    
+    def chmod(self, path, mode):
+        ino = self._lookup(path)
+        inode = self._iget(ino)
+
+        inode.mode = (inode.mode & InodeMode.S_IFMT) | (mode & 0o777)
+        inode.ctime = int(time.time())
+
+        self.inode_table.write(ino, inode)
+
+        return 0
+    
+    def link(self, target, source):
+        print(f"--- link called: source='{source}', target='{target}' ---")
+        src_parent_path, src_name = self._split(source)
+        src_parent_ino = self._lookup(src_parent_path)
+        src_parent_inode = self._iget(src_parent_ino)
+
+        curr_ino = None
+        for child_ino, child_name in self._read_dir_entries(src_parent_inode):
+            if child_name == src_name:
+                curr_ino = child_ino
+                break
+
+        if curr_ino == None:
+            raise OSError(errno.ENOENT, "Source path does not exist")
+        
+        curr_inode = self._iget(curr_ino)
+
+        if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFDIR:
+            raise OSError(errno.EPERM, "Hard link not allowed for directory")
+        
+        trg_parent_path, trg_name = self._split(target)
+        trg_parent_ino = self._lookup(trg_parent_path)
+        trg_parent_inode = self._iget(trg_parent_ino)
+
+        # Check trg_name is not existed
+        trg_dentry = self._read_dir_entries(trg_parent_inode)
+        for child_ino, child_name in trg_dentry:
+            if child_name == trg_name:
+                raise OSError(errno.EEXIST, "File is existed")
+            
+        trg_dentry.append((curr_ino, trg_name))
+        self._write_dir_entries(trg_parent_inode, trg_dentry)
+        
+        curr_time = int(time.time())
+        curr_inode.ctime = curr_time
+        curr_inode.nlink += 1
+        trg_parent_inode.ctime = trg_parent_inode.mtime = curr_time
+
+        self.inode_table.write(curr_ino, curr_inode)
+        self.inode_table.write(trg_parent_ino, trg_parent_inode)
+
+        print("link ()", source, "->" ,target)
+        print("curr_ino = ", curr_ino)
+        print("trg_dentry = ", trg_dentry)
+        print("trg_parent_ino = ", trg_parent_ino)
+
+        self.disk.fsync()
+
+        return 0
+
     
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", default="waynefs.img")
-    ap.add_argument("--mountpoint", default="mrt")
+    ap.add_argument("--mountpoint", default="mnt")
     ap.add_argument("--foreground", default=False)
     ap.add_argument("--debug", default=False)
     args = ap.parse_args()

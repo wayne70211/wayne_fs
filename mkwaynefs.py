@@ -110,9 +110,9 @@ def make_image(path, size_mb, block_size, inode_count):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", default="waynefs.img")
-    ap.add_argument("--size-mb", type=int, default=256)
+    ap.add_argument("--size-mb", type=int, default=64)
     ap.add_argument("--block-size", type=int, default=4096)
-    ap.add_argument("--inodes", type=int, default=4096)
+    ap.add_argument("--inodes", type=int, default=1024)
     args = ap.parse_args()
     make_image(args.image, args.size_mb, args.block_size, args.inodes)
 

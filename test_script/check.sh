@@ -185,5 +185,141 @@ fi
 rm "$WRITE_FILE"
 echo -e "${GREEN}✅ 測試通過：讀寫測試檔案已刪除${NC}"
 
+# 3: 測試 truncate
+echo -e "\n${YELLOW}--- 測試 3: 檔案截斷 (truncate) ---${NC}"
+TRUNC_FILE="$MNT/trunc.txt"
+echo -n "1234567890" > "$TRUNC_FILE"
+
+truncate -s 5 "$TRUNC_FILE"
+# 再次取得檔案大小
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    FILE_SIZE=$(stat -f %z "$TRUNC_FILE")
+else
+    FILE_SIZE=$(stat -c %s "$TRUNC_FILE")
+fi
+
+READ_CONTENT=$(cat "$TRUNC_FILE")
+if [ "$FILE_SIZE" -eq 5 ] && [ "$READ_CONTENT" == "12345" ]; then
+    echo -e "${GREEN}✅ 測試通過：'truncate' 縮小檔案成功。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：'truncate' 縮小檔案失敗。大小: $FILE_SIZE, 內容: $READ_CONTENT。${NC}"
+    exit 1
+fi
+
+truncate -s 12 "$TRUNC_FILE"
+# 再次取得檔案大小
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    FILE_SIZE=$(stat -f %z "$TRUNC_FILE")
+else
+    FILE_SIZE=$(stat -c %s "$TRUNC_FILE")
+fi
+
+if [ "$FILE_SIZE" -eq 12 ]; then
+    echo -e "${GREEN}✅ 測試通過：'truncate' 擴大檔案成功。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：'truncate' 擴大檔案失敗。大小: $FILE_SIZE。${NC}"
+    exit 1
+fi
+rm "$TRUNC_FILE"
+
+# 測試 4: rename
+echo -e "\n${YELLOW}--- 測試 4: 重新命名與移動 (rename/mv) ---${NC}"
+# 檔案重新命名
+touch "$MNT/old_name.txt"
+mv "$MNT/old_name.txt" "$MNT/new_name.txt"
+if [ ! -f "$MNT/old_name.txt" ] && [ -f "$MNT/new_name.txt" ]; then
+    echo -e "${GREEN}✅ 測試通過：檔案重新命名成功。${NC}"
+else
+    ls -la $MNT
+    echo -e "${RED}❌ 測試失敗：檔案重新命名失敗。${NC}"
+    exit 1
+fi
+
+# 檔案移動
+mv "$MNT/new_name.txt" "$TEST_DIR/"
+if [ ! -f "$MNT/new_name.txt" ] && [ -f "$TEST_DIR/new_name.txt" ]; then
+    echo -e "${GREEN}✅ 測試通過：檔案移動至目錄成功。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：檔案移動失敗。${NC}"
+    exit 1
+fi
+
+# 目錄移動
+mkdir "$MNT/d_to_move"
+mv "$MNT/d_to_move" "$TEST_DIR/"
+if [ ! -d "$MNT/d_to_move" ] && [ -d "$TEST_DIR/d_to_move" ]; then
+    echo -e "${GREEN}✅ 測試通過：目錄移動成功。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：目錄移動失敗。${NC}"
+    exit 1
+fi
+
+# 測試 5: utimens (更新時間戳)
+echo -e "\n${YELLOW}--- 測試 5: 時間戳更新 (utimens/touch) ---${NC}"
+TIME_TEST_FILE="$MNT/time_test.txt"
+
+# 1. 建立一個新檔案
+touch "$TIME_TEST_FILE"
+echo -e "已建立測試檔案 '$TIME_TEST_FILE'。"
+
+# 2. 取得原始的修改時間 (mtime)
+#    stat 指令在 macOS 和 Linux 上的參數不同，這裡做了相容性處理
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    INITIAL_MTIME=$(stat -f %m "$TIME_TEST_FILE")
+else
+    INITIAL_MTIME=$(stat -c %Y "$TIME_TEST_FILE")
+fi
+echo "初始修改時間 (mtime): $INITIAL_MTIME"
+
+# 3. 等待 2 秒，以確保時間戳會有明顯的變化
+echo "等待 2 秒..."
+sleep 2
+
+# 4. 再次 touch 同一個檔案，這將會觸發 utimens
+touch "$TIME_TEST_FILE"
+
+# 5. 取得新的修改時間
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    NEW_MTIME=$(stat -f %m "$TIME_TEST_FILE")
+else
+    NEW_MTIME=$(stat -c %Y "$TIME_TEST_FILE")
+fi
+echo "新的修改時間 (mtime): $NEW_MTIME"
+
+# 6. 比較兩個時間戳
+if [ "$NEW_MTIME" -gt "$INITIAL_MTIME" ]; then
+    echo -e "${GREEN}✅ 測試通過：'touch' 一個已存在的檔案成功更新了時間戳。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：時間戳沒有被更新。初始: $INITIAL_MTIME, 新的: $NEW_MTIME。${NC}"
+    exit 1
+fi
+
+# 7. 清理
+rm "$TIME_TEST_FILE"
+
+# --- 測試 6: 權限變更 (chmod) ---
+echo -e "\n${YELLOW}--- 測試 6: 權限變更 (chmod) ---${NC}"
+CHMOD_FILE="$MNT/chmod_test.txt"
+touch "$CHMOD_FILE"
+
+# 預設權限通常是 0644 (-rw-r--r--)
+# 我們把它改成 0755 (-rwxr-xr-x)
+chmod 755 "$CHMOD_FILE"
+
+# 檢查權限是否變更
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    PERMS=$(stat -f "%Sp" "$CHMOD_FILE" | cut -c 2-10) # macOS 格式
+else
+    PERMS=$(stat -c "%A" "$CHMOD_FILE" | cut -c 2-10) # Linux 格式
+fi
+
+if [ "$PERMS" == "rwxr-xr-x" ]; then
+    echo -e "${GREEN}✅ 測試通過：'chmod 755' 成功。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：'chmod 755' 後權限不符。應為 rwxr-xr-x, 實際為 $PERMS。${NC}"
+    exit 1
+fi
+rm "$CHMOD_FILE"
+
 # 清理
 echo "=== 測試結束 ==="
