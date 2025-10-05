@@ -297,5 +297,29 @@ fi
 # 7. 清理
 rm "$TIME_TEST_FILE"
 
+# --- 測試 6: 權限變更 (chmod) ---
+echo -e "\n${YELLOW}--- 測試 6: 權限變更 (chmod) ---${NC}"
+CHMOD_FILE="$MNT/chmod_test.txt"
+touch "$CHMOD_FILE"
+
+# 預設權限通常是 0644 (-rw-r--r--)
+# 我們把它改成 0755 (-rwxr-xr-x)
+chmod 755 "$CHMOD_FILE"
+
+# 檢查權限是否變更
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    PERMS=$(stat -f "%Sp" "$CHMOD_FILE" | cut -c 2-10) # macOS 格式
+else
+    PERMS=$(stat -c "%A" "$CHMOD_FILE" | cut -c 2-10) # Linux 格式
+fi
+
+if [ "$PERMS" == "rwxr-xr-x" ]; then
+    echo -e "${GREEN}✅ 測試通過：'chmod 755' 成功。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：'chmod 755' 後權限不符。應為 rwxr-xr-x, 實際為 $PERMS。${NC}"
+    exit 1
+fi
+rm "$CHMOD_FILE"
+
 # 清理
 echo "=== 測試結束 ==="
