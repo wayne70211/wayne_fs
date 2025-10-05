@@ -83,7 +83,7 @@ class WayneFS(LoggingMixIn, Operations):
                 continue
             elif name == "..":
                 curr_inode = self._iget(curr_ino)
-                if curr_inode.mode != InodeMode.S_IFDIR:
+                if (curr_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
                     raise OSError(errno.ENOENT, "[A] No such file or directory") 
                 parent_ino = None
                 for child_ino, child_name in self._read_dir_entries(curr_inode):
@@ -96,7 +96,7 @@ class WayneFS(LoggingMixIn, Operations):
                 curr_ino = parent_ino
             else:
                 curr_inode = self._iget(curr_ino)
-                if curr_inode.mode != InodeMode.S_IFDIR:
+                if (curr_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
                     raise OSError(errno.ENOENT, "[B] No such file or directory") 
                 next_ino = None
                 for child_ino, child_name in self._read_dir_entries(curr_inode):
@@ -147,7 +147,7 @@ class WayneFS(LoggingMixIn, Operations):
         parent_path, curr_dir_name = self._split(path)
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
-        if parent_inode.mode != InodeMode.S_IFDIR:
+        if (parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
         # check the curr_dir_name not in parent_inode entries
@@ -165,7 +165,7 @@ class WayneFS(LoggingMixIn, Operations):
         self.disk.write_block(child_blk, raw_data + b"\x00" * (self.sb.block_size - len(raw_data)))
         
         # Child Inode
-        child_inode = Inode.empty(mode=InodeMode.S_IFDIR)
+        child_inode = Inode.empty(mode=(InodeMode.S_IFDIR | mode))
         child_inode.nlink = 2
         child_inode.size  = len(raw_data)
         child_inode.direct[0] = child_blk
@@ -193,7 +193,7 @@ class WayneFS(LoggingMixIn, Operations):
             raise OSError(errno.EPERM, "Root directory can not be removed")
          
         curr_inode = self._iget(curr_ino)
-        if curr_inode.mode != InodeMode.S_IFDIR:
+        if (curr_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
         curr_entries = self._read_dir_entries(curr_inode)
@@ -238,7 +238,7 @@ class WayneFS(LoggingMixIn, Operations):
 
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
-        if parent_inode.mode != InodeMode.S_IFDIR:
+        if (parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
         # check the curr_dir_name not in parent_inode entries
@@ -373,7 +373,7 @@ class WayneFS(LoggingMixIn, Operations):
 
         # write back entries of parent
         self._write_dir_entries(parent_inode, new_parent_entries)
-        if curr_inode.mode == InodeMode.S_IFDIR:
+        if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFDIR:
             raise OSError(errno.EISDIR, "Is a directory")
 
         curr_inode.nlink -= 1
@@ -439,10 +439,10 @@ class WayneFS(LoggingMixIn, Operations):
         new_parent_ino = self._lookup(new_parent_path)
         new_parent_inode = self._iget(new_parent_ino)
 
-        if old_parent_inode.mode != InodeMode.S_IFDIR:
+        if (old_parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
-        if new_parent_inode.mode != InodeMode.S_IFDIR:
+        if (new_parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
             raise OSError(errno.ENOENT, "No such directory") 
         
         old_parent_dentry = self._read_dir_entries(old_parent_inode)
@@ -457,13 +457,13 @@ class WayneFS(LoggingMixIn, Operations):
         
         curr_inode = self._iget(curr_ino)
 
-        old_parent_dentry = [entry for entry in old_parent_dentry if entry[0] != curr_ino]
+        old_parent_dentry = [entry for entry in old_parent_dentry if entry[1] != old_name]
         self._write_dir_entries(old_parent_inode, old_parent_dentry)
 
         new_parent_dentry = self._read_dir_entries(new_parent_inode)
         new_parent_dentry.append((curr_ino, new_name))
 
-        if curr_inode.mode == InodeMode.S_IFDIR:
+        if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFDIR:
             if old_parent_ino != new_parent_ino:
                 old_parent_inode.nlink -= 1
                 new_parent_inode.nlink += 1
