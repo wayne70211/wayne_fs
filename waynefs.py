@@ -501,6 +501,17 @@ class WayneFS(LoggingMixIn, Operations):
         self.inode_table.write(ino, inode)
 
         return 0
+    
+    def chmod(self, path, mode):
+        ino = self._lookup(path)
+        inode = self._iget(ino)
+
+        inode.mode = (inode.mode & InodeMode.S_IFMT) | (mode & 0o777)
+        inode.ctime = int(time.time())
+
+        self.inode_table.write(ino, inode)
+
+        return 0
 
     
 
