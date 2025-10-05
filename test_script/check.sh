@@ -253,5 +253,49 @@ else
     echo -e "${RED}❌ 測試失敗：目錄移動失敗。${NC}"
     exit 1
 fi
+
+# 測試 5: utimens (更新時間戳)
+echo -e "\n${YELLOW}--- 測試 5: 時間戳更新 (utimens/touch) ---${NC}"
+TIME_TEST_FILE="$MNT/time_test.txt"
+
+# 1. 建立一個新檔案
+touch "$TIME_TEST_FILE"
+echo -e "已建立測試檔案 '$TIME_TEST_FILE'。"
+
+# 2. 取得原始的修改時間 (mtime)
+#    stat 指令在 macOS 和 Linux 上的參數不同，這裡做了相容性處理
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    INITIAL_MTIME=$(stat -f %m "$TIME_TEST_FILE")
+else
+    INITIAL_MTIME=$(stat -c %Y "$TIME_TEST_FILE")
+fi
+echo "初始修改時間 (mtime): $INITIAL_MTIME"
+
+# 3. 等待 2 秒，以確保時間戳會有明顯的變化
+echo "等待 2 秒..."
+sleep 2
+
+# 4. 再次 touch 同一個檔案，這將會觸發 utimens
+touch "$TIME_TEST_FILE"
+
+# 5. 取得新的修改時間
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    NEW_MTIME=$(stat -f %m "$TIME_TEST_FILE")
+else
+    NEW_MTIME=$(stat -c %Y "$TIME_TEST_FILE")
+fi
+echo "新的修改時間 (mtime): $NEW_MTIME"
+
+# 6. 比較兩個時間戳
+if [ "$NEW_MTIME" -gt "$INITIAL_MTIME" ]; then
+    echo -e "${GREEN}✅ 測試通過：'touch' 一個已存在的檔案成功更新了時間戳。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：時間戳沒有被更新。初始: $INITIAL_MTIME, 新的: $NEW_MTIME。${NC}"
+    exit 1
+fi
+
+# 7. 清理
+rm "$TIME_TEST_FILE"
+
 # 清理
 echo "=== 測試結束 ==="
