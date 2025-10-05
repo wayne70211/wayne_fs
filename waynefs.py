@@ -507,7 +507,7 @@ class WayneFS(LoggingMixIn, Operations):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", default="waynefs.img")
-    ap.add_argument("--mountpoint", default="mrt")
+    ap.add_argument("--mountpoint", default="mnt")
     ap.add_argument("--foreground", default=False)
     ap.add_argument("--debug", default=False)
     args = ap.parse_args()
