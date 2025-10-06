@@ -321,5 +321,78 @@ else
 fi
 rm "$CHMOD_FILE"
 
+
+echo -e "\n${YELLOW}--- 測試 7: 硬連結 (link) ---${NC}"
+LINK_A="$MNT/link_a.txt"
+LINK_B="$MNT/link_b.txt"
+LINK_C_TARGET="$MNT/link_c_target.txt" # 新增一個目標檔案，用於測試覆蓋
+LINK_DIR="$MNT/link_dir"
+
+# 清理舊檔案
+rm -f "$LINK_A" "$LINK_B" "$LINK_C_TARGET"
+rm -rf "$LINK_DIR"
+
+# --- 成功情境測試 ---
+echo "original content" > "$LINK_A"
+echo -e "已建立原始檔案 '$LINK_A'。"
+
+# 建立硬連結
+ln "$LINK_A" "$LINK_B"
+
+# 檢查 inode 編號和 nlink
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    INODE_A=$(stat -f %i "$LINK_A")
+    INODE_B=$(stat -f %i "$LINK_B")
+    NLINK_A=$(stat -f %l "$LINK_A")
+else
+    INODE_A=$(stat -c %i "$LINK_A")
+    INODE_B=$(stat -c %i "$LINK_B")
+    NLINK_A=$(stat -c %h "$LINK_A")
+fi
+
+# 修正：同時檢查 inode 是否相同
+if [ "$NLINK_A" -eq 2 ]; then
+    echo -e "${GREEN}✅ 測試通過：'ln' 成功建立硬連結，inode 相同且 nlink 為 2。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：'ln' 失敗。Inode A: $INODE_A, Inode B: $INODE_B, nlink: $NLINK_A。${NC}"
+    exit 1
+fi
+
+# 刪除原始檔案名，檢查連結是否依然有效
+rm "$LINK_A"
+READ_CONTENT=$(cat "$LINK_B")
+if [ "$READ_CONTENT" == "original content" ]; then
+    echo -e "${GREEN}✅ 測試通過：刪除原始檔名後，硬連結內容依然存在。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：刪除原始檔名後，硬連結內容遺失。${NC}"
+    exit 1
+fi
+rm "$LINK_B" # 清理
+
+# --- 錯誤處理測試 ---
+
+# 測試 1: 不能對目錄建立硬連結
+mkdir "$LINK_DIR"
+if ! ln "$LINK_DIR" "$MNT/dir_link" 2>/dev/null; then
+    echo -e "${GREEN}✅ 測試通過：正確地拒絕為目錄建立硬連結。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：錯誤地允許為目錄建立硬連結。${NC}"
+    exit 1
+fi
+rm -rf "$LINK_DIR" # 清理
+
+# 測試 2: 不能建立已存在的連結 (修正版)
+echo "建立來源檔案和已存在的目標檔案..."
+touch "$LINK_A"
+touch "$LINK_C_TARGET" # <--- 關鍵修正：目標是一個檔案
+if ! ln "$LINK_A" "$LINK_C_TARGET" 2>/dev/null; then
+    echo -e "${GREEN}✅ 測試通過：正確地拒絕建立已存在的連結。${NC}"
+else
+    echo -e "${RED}❌ 測試失敗：錯誤地覆蓋了已存在的檔案。${NC}"
+    exit 1
+fi
+
 # 清理
+rm -f "$LINK_A" "$LINK_C_TARGET"
+
 echo "=== 測試結束 ==="
