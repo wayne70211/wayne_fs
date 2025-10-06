@@ -6,21 +6,21 @@
 
 分為以下幾階段實作
 
-### 第一階段
+### 第一階段 (POSIX)
 1. 建立 SuperBlock，裡面含有 patition 資訊
 2. 建立 Inode Table，紀錄當前資料的資訊以及實體 offset，就是 LBA
 3. 建立 Bitmap，紀錄哪些實體位置可以使用
+4. 實作 getattr, readdir, mkdir, rmdir 功能，並且驗證
+5. 實作 create, open, write, read 功能，並且驗證
+6. 實作 truncate, rename, utimens 功能，並且驗證
+7. 實作 link, chmod 功能，並且驗證
 
-### 第二階段
-1. 實作 getattr, readdir, mkdir, rmdir 功能，並且驗證
-2. 實作 create, open, write, read 功能，並且驗證
-3. 實作 truncate, rename, utimens 功能，並且驗證
+### 第二階段 
+1. 實作 statfs, release, flush, fsync 功能，並且驗證
+2. 實作 Indirect Blocks 以支援更大檔案
+3. 實作 Write Cache & Sync 機制
 
 ### 第三階段
-1. 實作 Journaling 功能
-2. 實作 Write Caching & Sync
-
-### 第四階段
 1. 設計 Copy-on-Write 機制
 2. 以 Device Driver 的 FTL 角度優化設計
 
