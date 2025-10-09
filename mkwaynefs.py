@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import os, struct, argparse, math, sys, time
+from journal import JournalSuperblock, JOURNAL_SB_MAGIC
 from layout import MAGIC, SB_FMT, SB_SIZE, INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, ceil_div
 from disk import Disk
 from bitmap import InodeBitmap, BlockBitmap
 
 ROOT_INO = 0 
 
-def make_image(path, size_mb, block_size, inode_count):
+def make_image(path, size_mb, block_size, inode_count, journal_size):
     total_blocks = (size_mb * 1024 * 1024) // block_size
     if total_blocks < 1024:
         raise SystemExit("Image too small; give at least ~4MB")
@@ -31,7 +32,11 @@ def make_image(path, size_mb, block_size, inode_count):
     inode_bitmap_start = sb_blocks
     block_bitmap_start = inode_bitmap_start + inode_bitmap_blocks
     inode_table_start  = block_bitmap_start + block_bitmap_blocks
-    data_start         = inode_table_start + inode_blocks
+
+    journal_area_start = inode_table_start + inode_blocks
+    journal_area_blocks = ceil_div(journal_size, block_size)
+
+    data_start         = journal_area_start + journal_area_blocks
 
     if data_start >= total_blocks:
         raise SystemExit("Layout exceeds image size; increase size or reduce inode_count")
@@ -54,6 +59,8 @@ def make_image(path, size_mb, block_size, inode_count):
             block_bitmap_blocks,
             inode_table_start,
             inode_blocks,
+            journal_area_start,
+            journal_area_blocks,
             data_start,
             0,  # reserved
         )
@@ -88,7 +95,23 @@ def make_image(path, size_mb, block_size, inode_count):
     root_inode.size  = len(raw_data)
     root_inode.direct[0] = sb.data_start
     inode_table.write(ROOT_INO, root_inode)
+    
+    # Journal Superblock
+    log_start_block = journal_area_start + 1
+    log_num_blocks = journal_area_blocks - 1
 
+    initial_journal_sb = JournalSuperblock(
+        magic=JOURNAL_SB_MAGIC,
+        start_block=log_start_block,
+        num_blocks=log_num_blocks,
+        head=log_start_block,  # head 和 tail 都從紀錄區的開頭開始
+        tail=log_start_block,
+        last_tid=0             # 初始 TID 為 0
+    )
+
+    raw_jsb = initial_journal_sb.pack()
+    disk.write_block(journal_area_start, raw_jsb.ljust(sb.block_size, b'\x00'))
+    
     inode_bitmap.set_used(ROOT_INO)
     inode_bitmap.flush()
 
@@ -101,20 +124,25 @@ def make_image(path, size_mb, block_size, inode_count):
     disk.fsync()
 
     print(f"Created image: {path}")
-    print(f"  size_mb={size_mb}, block_size={block_size}, total_blocks={total_blocks}")
-    print(f"  inode_bitmap_start={inode_bitmap_start} blocks={inode_bitmap_blocks}")
-    print(f"  block_bitmap_start={block_bitmap_start} blocks={block_bitmap_blocks}")
-    print(f"  inode_table_start={inode_table_start} blocks={inode_blocks}")
-    print(f"  data_start={data_start}")
+    print("=" * 50)
+    print(f"{'Field':22} | {'Value':10} | {'Blocks'}")
+    print("-" * 50)
+    print(f"{'inode_bitmap_start':22} | {inode_bitmap_start:<10} | {inode_bitmap_blocks}")
+    print(f"{'block_bitmap_start':22} | {block_bitmap_start:<10} | {block_bitmap_blocks}")
+    print(f"{'inode_table_start':22} | {inode_table_start:<10} | {inode_blocks}")
+    print(f"{'journal_area_start':22} | {journal_area_start:<10} | {journal_area_blocks}")
+    print(f"{'data_start':22} | {data_start:<10} | {'-'}")
+    print("=" * 50)
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", default="waynefs.img")
-    ap.add_argument("--size-mb", type=int, default=64)
+    ap.add_argument("--size-mb", type=int, default=128)
     ap.add_argument("--block-size", type=int, default=4096)
     ap.add_argument("--inodes", type=int, default=1024)
+    ap.add_argument("--journal-size", type=int, default=1024)
     args = ap.parse_args()
-    make_image(args.image, args.size_mb, args.block_size, args.inodes)
+    make_image(args.image, args.size_mb, args.block_size, args.inodes, args.journal_size)
 
 if __name__ == "__main__":
     main()
