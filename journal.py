@@ -6,15 +6,16 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple
 from enum import Enum, auto
 import time
+from contextlib import contextmanager
 
 JOURNAL_SB_MAGIC = b"WAYNE_JOURNAL_SB"
 JOURNAL_MAGIC = b"WAYNE_JOURNAL"
 JOURNAL_SIZE = 1024
 
-class JournalBlockType:
-    BLOCK_TYPE_DESCRIPTOR = auto()
-    BLOCK_TYPE_METADATA = auto()
-    BLOCK_TYPE_COMMIT = auto()
+class JournalBlockType(Enum):
+    BLOCK_TYPE_DESCRIPTOR = 1
+    BLOCK_TYPE_METADATA = 2
+    BLOCK_TYPE_COMMIT = 3
 
 @dataclass
 class JournalSuperblock:
@@ -30,8 +31,9 @@ class JournalSuperblock:
     def pack(self) -> bytes:
         return struct.pack(self.FORMAT, self.magic, self.start_block, self.num_blocks, self.head, self.tail, self.last_tid)
     
+    @classmethod
     def unpack(cls, data: bytes) -> "JournalSuperblock":
-        magic, start_block, num_blocks, head, tail, last_tid = struct.unpack(cls.FORMAT, data)
+        magic, start_block, num_blocks, head, tail, last_tid = struct.unpack(cls.FORMAT, data[:struct.calcsize(cls.FORMAT)])
 
         if magic != JOURNAL_SB_MAGIC:
             raise ValueError("Invalid journal superblock magic")
@@ -60,9 +62,9 @@ class JournalHeader:
 
 @dataclass
 class DescriptorBlock:
-    header: JournalHeader
+    #header: JournalHeader
     num_blocks: int
-    final_addrs: List[int]
+    #final_addrs: List[int]
 
     FORMAT = "<I"
 
@@ -123,9 +125,16 @@ class Journal():
         next_relative_pos = ((current_block - self.journal_sb.start_block) + 1) % self.journal_sb.num_blocks
         return self.journal_sb.start_block + next_relative_pos
 
-    def begin(self) -> "Transaction":
+    @contextmanager
+    def begin(self):
         self.next_tid += 1
-        return Transaction(self, self.next_tid)
+        tx = Transaction(self, self.next_tid)
+
+        try:
+            yield tx
+        finally:
+            print(f"Transaction {tx.tid} finished, committing...")
+            self.commit(tx)
 
     def recover(self):
         return
@@ -138,7 +147,9 @@ class Journal():
             return
         
         # Descriptor Block
-        desc_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_DESCRIPTOR, tid=tx.tid)
+        print(f" Pack JournalHeader tid = {tx.tid}, block_type = {JournalBlockType.BLOCK_TYPE_DESCRIPTOR.value} magic = {JOURNAL_MAGIC}")
+
+        desc_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_DESCRIPTOR.value, tid=tx.tid)
         final_addrs = list(tx.write_buffer.keys())
         desc_block_content = DescriptorBlock(num_blocks=len(final_addrs)).pack()
 
@@ -154,18 +165,19 @@ class Journal():
         current_log_tail = self._get_next_log_block(current_log_tail)
         # Metadata Block
         for addr in final_addrs:
-            metadata_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_METADATA, tid=tx.tid)
+            #metadata_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_METADATA.value, tid=tx.tid)
             
             _, block_data= tx.write_buffer[addr] 
             
-            full_metadata_block = metadata_header.pack() + block_data
-            
-            self.disk.write_block(current_log_tail, full_metadata_block)
+            #full_metadata_block = metadata_header.pack() + block_data
+            block_data = block_data.ljust(self.main_sb.block_size, b'\x00')
+            print(f"[DEBUG] addr = {addr} block_data = {len(block_data)}")
+            self.disk.write_block(current_log_tail, block_data)
             current_log_tail = self._get_next_log_block(current_log_tail)
 
 
         # Commit Block
-        commit_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_COMMIT, tid=tx.tid)
+        commit_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_COMMIT.value, tid=tx.tid)
         full_commit_block = commit_header.pack().ljust(self.main_sb.block_size, b'\x00')
 
         self.disk.write_block(current_log_tail, full_commit_block)

@@ -140,7 +140,7 @@ def main():
     ap.add_argument("--size-mb", type=int, default=128)
     ap.add_argument("--block-size", type=int, default=4096)
     ap.add_argument("--inodes", type=int, default=1024)
-    ap.add_argument("--journal-size", type=int, default=1024)
+    ap.add_argument("--journal-size", type=int, default=10*4096)
     args = ap.parse_args()
     make_image(args.image, args.size_mb, args.block_size, args.inodes, args.journal_size)
 

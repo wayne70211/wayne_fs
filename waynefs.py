@@ -4,6 +4,7 @@ from fuse import FUSE, Operations, LoggingMixIn
 from disk import Disk
 from bitmap import InodeBitmap, BlockBitmap
 from layout import INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState, ceil_div
+from journal import Journal
 from dataclasses import dataclass
 from typing import List, Tuple, Dict
 
@@ -16,6 +17,7 @@ class WayneFS(LoggingMixIn, Operations):
         self.inode_bitmap = InodeBitmap(self.disk, self.sb)
         self.block_bitmap = BlockBitmap(self.disk, self.sb)
         self.inode_table = InodeTable(self.disk, self.sb)
+        self.journal = Journal(self.disk, self.sb)
         self.start = time.time()
 
         # Open File Table
@@ -165,23 +167,24 @@ class WayneFS(LoggingMixIn, Operations):
         raw_data = DictEnDecoder.pack_dir(child_entries)
         self.disk.write_block(child_blk, raw_data + b"\x00" * (self.sb.block_size - len(raw_data)))
         
-        # Child Inode
-        child_inode = Inode.empty(mode=(InodeMode.S_IFDIR | mode))
-        child_inode.nlink = 2
-        child_inode.size  = len(raw_data)
-        child_inode.direct[0] = child_blk
-        self.inode_table.write(child_ino, child_inode)
-
-        # Parent Inode
         parent_entries.append((child_ino, curr_dir_name))
         self._write_dir_entries(parent_inode, parent_entries)
-        parent_inode.nlink += 1
-        parent_inode.ctime = parent_inode.mtime = child_inode.ctime
-        self.inode_table.write(parent_ino, parent_inode)
 
-        self.block_bitmap.flush()
-        self.inode_bitmap.flush()
-        self.disk.fsync()
+        with self.journal.begin() as tx:
+            # Child Inode
+            child_inode = Inode.empty(mode=(InodeMode.S_IFDIR | mode))
+            child_inode.nlink = 2
+            child_inode.size  = len(raw_data)
+            child_inode.direct[0] = child_blk
+            self.inode_table.write(child_ino, child_inode, tx)
+
+            # Parent Inode
+            parent_inode.nlink += 1
+            parent_inode.ctime = parent_inode.mtime = child_inode.ctime
+            self.inode_table.write(parent_ino, parent_inode, tx)
+
+            self.inode_bitmap.flush(tx)
+            self.block_bitmap.flush(tx)
 
 
     def rmdir(self, path):

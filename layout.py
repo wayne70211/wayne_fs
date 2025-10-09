@@ -239,12 +239,18 @@ class InodeTable:
         return Inode.unpack(raw)
 
     def write(self, ino: int, inode: Inode, tx: Optional[Transaction] = None):
-        if tx:
-            block_addr = self.sb.inode_table_start + (ino // self.inodes_per_block)
-            offset_in_block = (ino % self.inodes_per_block) * self.inode_size
+        block_addr = self.sb.inode_table_start + (ino // self.inodes_per_block)
+        offset_in_block = (ino % self.inodes_per_block) * self.inode_size
 
+        if tx and block_addr in tx.write_buffer:
+            _block_type, block_data = tx.write_buffer[block_addr]
+            full_block_data = bytearray(block_data)
+        else:
             full_block_data = bytearray(self.disk.read_block(block_addr))
-            full_block_data[offset_in_block : offset_in_block + self.inode_size] = inode.pack()
+
+        if tx:
+            full_block_data[offset_in_block : offset_in_block + self.inode_size] = inode.pack().ljust(self.inode_size, b'\x00')
+            print(f"[Debug] Inode Table block addr = {block_addr} off = {offset_in_block} ino = {ino}")
             tx.write(block_addr, bytes(full_block_data), "Inode Table")
         else:
             off = self.__inode_offset(ino)
