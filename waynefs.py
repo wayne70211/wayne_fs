@@ -223,11 +223,10 @@ class WayneFS(LoggingMixIn, Operations):
         self._write_dir_entries(parent_inode, new_parent_entries)
         
         # write back of parent inode to inode table
-        self.inode_table.write(parent_ino, parent_inode)
-        
-        self.block_bitmap.flush()
-        self.inode_bitmap.flush()
-        self.disk.fsync()
+        with self.journal.begin() as tx:
+            self.inode_table.write(parent_ino, parent_inode, tx)
+            self.block_bitmap.flush(tx)
+            self.inode_bitmap.flush(tx)
 
     def open(self, path, flags):
         # Check file existed and get file ino
@@ -252,18 +251,17 @@ class WayneFS(LoggingMixIn, Operations):
                 raise OSError(errno.EEXIST, "File is existed") 
         
         child_ino = self._alloc_inode()
-        child_inode = Inode.empty(mode=(InodeMode.S_IFREG | mode))
-        child_inode.nlink = 1
-        child_inode.size = 0
-        self.inode_table.write(child_ino, child_inode)
-
         parent_entries.append((child_ino, curr_file_name))
         self._write_dir_entries(parent_inode, parent_entries)
-        parent_inode.ctime = parent_inode.mtime = child_inode.ctime
-        self.inode_table.write(parent_ino, parent_inode)
 
-        self.inode_bitmap.flush()
-        self.disk.fsync()
+        with self.journal.begin() as tx:
+            child_inode = Inode.empty(mode=(InodeMode.S_IFREG | mode))
+            child_inode.nlink = 1
+            child_inode.size = 0
+            self.inode_table.write(child_ino, child_inode, tx)
+            parent_inode.ctime = parent_inode.mtime = child_inode.ctime
+            self.inode_table.write(parent_ino, parent_inode, tx)
+            self.inode_bitmap.flush(tx)
 
         curr_fh = self.next_fh
         self.next_fh += 1
@@ -315,11 +313,12 @@ class WayneFS(LoggingMixIn, Operations):
 
             self.disk.write_block(curr_inode.direct[curr_block_idx], bytes(curr_block))
 
-
-        curr_inode.size = max(curr_inode.size, offset+length)
-        curr_inode.mtime = int(time.time())
-        self.inode_table.write(curr_file_state.ino, curr_inode)
-        self.block_bitmap.flush()
+        # Add Journal record metadata
+        with self.journal.begin() as tx:
+            curr_inode.size = max(curr_inode.size, offset+length)
+            curr_inode.mtime = int(time.time())
+            self.inode_table.write(curr_file_state.ino, curr_inode, tx)
+            self.block_bitmap.flush(tx)
 
         return length
     
@@ -355,6 +354,10 @@ class WayneFS(LoggingMixIn, Operations):
             data[data_cursor:data_cursor+need_read_data_len] = curr_block[curr_start_offset: curr_end_offset]
             data_cursor += need_read_data_len
 
+        # Add Journal record metadata (access time)
+        with self.journal.begin() as tx:
+            curr_inode.atime = int(time.time())
+            self.inode_table.write(curr_file_state.ino, curr_inode, tx)
 
         return bytes(data)
     
@@ -382,23 +385,22 @@ class WayneFS(LoggingMixIn, Operations):
 
         curr_inode.nlink -= 1
 
-        if curr_inode.nlink == 0:
-            # Remove all block and set free
-            for block_no in curr_inode.direct:
-                if block_no != 0:
-                    self._free_block(block_no)
-            self._free_inode(curr_ino)
-        else:
-            self.inode_table.write(curr_ino, curr_inode)
+        with self.journal.begin() as tx:
+            if curr_inode.nlink == 0:
+                # Remove all block and set free
+                for block_no in curr_inode.direct:
+                    if block_no != 0:
+                        self._free_block(block_no)
+                self._free_inode(curr_ino)
+            else:
+                self.inode_table.write(curr_ino, curr_inode, tx)
 
-        parent_inode.mtime = parent_inode.ctime = int(time.time())
-        # write back of parent inode to inode table
-        self.inode_table.write(parent_ino, parent_inode)
+            parent_inode.mtime = parent_inode.ctime = int(time.time())
+            # write back of parent inode to inode table
+            self.inode_table.write(parent_ino, parent_inode, tx)
 
-        
-        self.block_bitmap.flush()
-        self.inode_bitmap.flush()
-        self.disk.fsync()
+            self.block_bitmap.flush(tx)
+            self.inode_bitmap.flush(tx)
     
     def truncate(self, path, length, fh=None):
         ino = self._lookup(path)
@@ -426,10 +428,11 @@ class WayneFS(LoggingMixIn, Operations):
                     self._free_block(inode.direct[i])
                     inode.direct[i] = 0
 
-        inode.size = length
-        inode.mtime = inode.ctime = int(time.time())
-        self.inode_table.write(ino, inode)
-        self.block_bitmap.flush()
+        with self.journal.begin() as tx:
+            inode.size = length
+            inode.mtime = inode.ctime = int(time.time())
+            self.inode_table.write(ino, inode, tx)
+            self.block_bitmap.flush(tx)
     
     def rename(self, old, new):
         if old == new:
@@ -480,16 +483,15 @@ class WayneFS(LoggingMixIn, Operations):
         self._write_dir_entries(old_parent_inode, old_parent_dentry)
         self._write_dir_entries(new_parent_inode, new_parent_dentry)
 
-        current_time = int(time.time())
-        old_parent_inode.mtime = old_parent_inode.ctime = current_time
-        new_parent_inode.mtime = new_parent_inode.ctime = current_time
-        curr_inode.ctime = current_time
-
         # Update Inode Table
-        self.inode_table.write(old_parent_ino, old_parent_inode)
-        self.inode_table.write(new_parent_ino, new_parent_inode)
-        self.inode_table.write(curr_ino, curr_inode)
-        self.disk.fsync()
+        with self.journal.begin() as tx:
+            current_time = int(time.time())
+            old_parent_inode.mtime = old_parent_inode.ctime = current_time
+            new_parent_inode.mtime = new_parent_inode.ctime = current_time
+            curr_inode.ctime = current_time
+            self.inode_table.write(old_parent_ino, old_parent_inode, tx)
+            self.inode_table.write(new_parent_ino, new_parent_inode, tx)
+            self.inode_table.write(curr_ino, curr_inode, tx)
     
     def utimens(self, path, times=None):
         ino = self._lookup(path)
@@ -499,10 +501,11 @@ class WayneFS(LoggingMixIn, Operations):
             now = time.time()
             times = (now, now)
 
-        inode.atime = int(times[0])
-        inode.mtime = int(times[1])
-        inode.ctime = int(time.time())
-        self.inode_table.write(ino, inode)
+        with self.journal.begin() as tx:
+            inode.atime = int(times[0])
+            inode.mtime = int(times[1])
+            inode.ctime = int(time.time())
+            self.inode_table.write(ino, inode, tx)
 
         return 0
     
@@ -510,10 +513,10 @@ class WayneFS(LoggingMixIn, Operations):
         ino = self._lookup(path)
         inode = self._iget(ino)
 
-        inode.mode = (inode.mode & InodeMode.S_IFMT) | (mode & 0o777)
-        inode.ctime = int(time.time())
-
-        self.inode_table.write(ino, inode)
+        with self.journal.begin() as tx:
+            inode.mode = (inode.mode & InodeMode.S_IFMT) | (mode & 0o777)
+            inode.ctime = int(time.time())
+            self.inode_table.write(ino, inode, tx)
 
         return 0
     
@@ -550,20 +553,20 @@ class WayneFS(LoggingMixIn, Operations):
         trg_dentry.append((curr_ino, trg_name))
         self._write_dir_entries(trg_parent_inode, trg_dentry)
         
-        curr_time = int(time.time())
-        curr_inode.ctime = curr_time
-        curr_inode.nlink += 1
-        trg_parent_inode.ctime = trg_parent_inode.mtime = curr_time
+        
 
-        self.inode_table.write(curr_ino, curr_inode)
-        self.inode_table.write(trg_parent_ino, trg_parent_inode)
+        with self.journal.begin() as tx:
+            curr_time = int(time.time())
+            curr_inode.ctime = curr_time
+            curr_inode.nlink += 1
+            trg_parent_inode.ctime = trg_parent_inode.mtime = curr_time
+            self.inode_table.write(curr_ino, curr_inode, tx)
+            self.inode_table.write(trg_parent_ino, trg_parent_inode, tx)
 
         print("link ()", source, "->" ,target)
         print("curr_ino = ", curr_ino)
         print("trg_dentry = ", trg_dentry)
         print("trg_parent_ino = ", trg_parent_ino)
-
-        self.disk.fsync()
 
         return 0
 

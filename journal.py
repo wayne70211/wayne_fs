@@ -62,10 +62,7 @@ class JournalHeader:
 
 @dataclass
 class DescriptorBlock:
-    #header: JournalHeader
     num_blocks: int
-    #final_addrs: List[int]
-
     FORMAT = "<I"
 
     def pack(self) -> bytes:
@@ -164,14 +161,10 @@ class Journal():
 
         current_log_tail = self._get_next_log_block(current_log_tail)
         # Metadata Block
-        for addr in final_addrs:
-            #metadata_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_METADATA.value, tid=tx.tid)
-            
-            _, block_data= tx.write_buffer[addr] 
-            
-            #full_metadata_block = metadata_header.pack() + block_data
+        for addr in final_addrs:            
+            block_type, block_data= tx.write_buffer[addr] 
             block_data = block_data.ljust(self.main_sb.block_size, b'\x00')
-            print(f"[DEBUG] addr = {addr} block_data = {len(block_data)}")
+            print(f"[DEBUG] addr = {addr} block_type = {block_type} block_data = {len(block_data)}")
             self.disk.write_block(current_log_tail, block_data)
             current_log_tail = self._get_next_log_block(current_log_tail)
 
