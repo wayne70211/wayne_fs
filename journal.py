@@ -130,15 +130,69 @@ class Journal():
         try:
             yield tx
         finally:
-            print(f"Transaction {tx.tid} finished, committing...")
+            print(f"Transaction {tx.tid} finished, committing")
             self.commit(tx)
 
     def recover(self):
-        return
-    
-    def reply(self):
-        return
-    
+        print("Starting journal recovery")
+        head = self.journal_sb.head
+        tail = self.journal_sb.tail
+
+        if head == tail:
+            print("Journal is clean. No recovery needed.")
+            return
+        
+        print(f"Scanning log from head={head} to tail={tail}")
+        transactions_to_replay = {}
+        
+        current = head
+        while current != tail:
+            try:
+                raw_block = self.disk.read_block(current)
+                header = JournalHeader.unpack(raw_block)
+                print(f"  - Reading block {current}: TID={header.tid}, Type={header.block_type}")
+                if header.block_type == JournalBlockType.BLOCK_TYPE_DESCRIPTOR.value:
+                    desc_content_offset = struct.calcsize(JournalHeader.FORMAT)
+                    num_blocks, = struct.unpack_from("<I", raw_block, desc_content_offset)
+
+                    final_addrs = []
+                    addr_offset = desc_content_offset + struct.calcsize("<I")
+                    for _ in range(num_blocks):
+                        addr, = struct.unpack_from("<I", raw_block, addr_offset)
+                        final_addrs.append(addr)
+                        addr_offset += struct.calcsize("<I")
+
+                    metadata = {}
+                    log_ptr = self._get_next_log_block(current)
+                    for addr in final_addrs:
+                        metadata[addr] = self.disk.read_block(log_ptr)
+                        log_ptr = self._get_next_log_block(log_ptr)
+                    
+                    transactions_to_replay[header.tid] = (final_addrs, metadata)
+                elif header.block_type == JournalBlockType.BLOCK_TYPE_COMMIT.value:
+                    if header.tid in transactions_to_replay:
+                        print(f"  - Found commit for TID={header.tid}. Replaying transaction.")
+                        final_addrs, metadata = transactions_to_replay[header.tid]
+
+                        for addr in final_addrs:
+                            print(f"    - REPLAY: Writing block for final addr {addr}")
+                            self.disk.write_block(addr, metadata[addr])
+                        
+                        del transactions_to_replay[header.tid]
+                        
+                        new_head = current
+                        new_head = self._get_next_log_block(new_head)
+                        self.journal_sb.head = new_head
+            except (ValueError, struct.error) as e:
+                print(f"  - Error reading block {current}: {e}. Stopping recovery scan.")
+                break
+
+            current = self._get_next_log_block(current)
+        
+        print("Recovery finished. Cleaning journal by setting head = tail.")
+        self.journal_sb.head = self.journal_sb.tail
+        self.disk.write_block(self.journal_area_start, self.journal_sb.pack().ljust(self.main_sb.block_size, b'\x00'))
+        
     def commit(self, tx: Transaction):
         if not tx.write_buffer:
             return
