@@ -46,19 +46,24 @@ class Bitmap:
         return -1
     
     def flush(self, tx: Optional[Transaction] = None):
+        padded_buf = bytearray(self.num_blocks * self.sb.block_size)
+        padded_buf[:len(self.buf)] = self.buf
+
         if tx:
             data_ptr = 0
             for i in range(self.num_blocks):
+                block_data = padded_buf[data_ptr : data_ptr + self.sb.block_size]
                 print(f"[DEBUG] flush {self.bitmap_type} {i} buf size = {len(bytes(self.buf[data_ptr:data_ptr+self.sb.block_size]))}")
-                tx.write(self.start_block + i, bytes(self.buf[data_ptr:data_ptr+self.sb.block_size]), self.bitmap_type)
+                tx.write(self.start_block + i, block_data, self.bitmap_type)
                 data_ptr += self.sb.block_size
         else:
-            self.disk.write_at(self.start_block*self.sb.block_size, self.buf)
+            self.disk.write_at(self.start_block * self.sb.block_size, padded_buf)
+
 
         
 class InodeBitmap(Bitmap):
     def __init__(self, disk: Disk, sb: Superblock):
-        super().__init__(disk, sb, sb.inode_bitmap_start, sb.inode_bitmap_blocks, sb.total_blocks, "Inode Bitmap")
+        super().__init__(disk, sb, sb.inode_bitmap_start, sb.inode_bitmap_blocks, sb.inode_count, "Inode Bitmap")
 
     def find_free_inode(self, start_idx: int = 0) -> int:
         return self.find_free_entry(max(1, start_idx))
