@@ -239,4 +239,8 @@ class Journal():
             print(f"    - Writing {block_type} to block {final_addr}")
             self.disk.write_block(final_addr, block_data)
 
+        print(f"  - tx {tx.tid}: Checkpoint complete. Advancing journal head pointer.")
+        self.journal_sb.head = self.journal_sb.tail
+        self.disk.write_block(self.main_sb.journal_area_start, self.journal_sb.pack().ljust(self.main_sb.block_size, b'\x00'))
+
     
