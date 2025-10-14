@@ -3,9 +3,7 @@ from layout import Superblock
 from transaction import Transaction
 import struct
 from dataclasses import dataclass
-from typing import List, Dict, Tuple
-from enum import Enum, auto
-import time
+from enum import Enum
 from contextlib import contextmanager
 
 JOURNAL_SB_MAGIC = b"WAYNE_JOURNAL_SB"

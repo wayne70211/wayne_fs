@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, struct, argparse, math, sys, time
+import struct, argparse
 from journal import JournalSuperblock, JOURNAL_SB_MAGIC
 from layout import MAGIC, SB_FMT, SB_SIZE, INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, ceil_div
 from disk import Disk

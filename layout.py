@@ -3,7 +3,7 @@ import struct
 from dataclasses import dataclass, field
 from disk import Disk
 from transaction import Transaction
-from typing import List, Tuple, Optional
+from typing import Optional
 from enum import IntFlag
 import time
 

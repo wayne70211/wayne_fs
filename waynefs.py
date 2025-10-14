@@ -3,9 +3,8 @@ import os, errno, time, argparse
 from fuse import FUSE, Operations, LoggingMixIn
 from disk import Disk
 from bitmap import InodeBitmap, BlockBitmap
-from layout import INODE_SIZE, Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState, ceil_div
+from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState, ceil_div
 from journal import Journal
-from dataclasses import dataclass
 from typing import List, Tuple, Dict
 
 ROOT_INO = 0 
