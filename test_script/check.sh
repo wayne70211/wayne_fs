@@ -29,11 +29,11 @@ else
 fi
 
 echo "Creating image..."
-python mkwaynefs.py --image waynefs.img --size-mb 64 --block-size 4096 --inodes 1024
+python mkwaynefs.py --image waynefs.img --size-mb 128 --block-size 4096 --inodes 1024
 sleep 1   # 等待掛載完成
 echo "Mounting..."
 # 在指令結尾加上 '&'，讓 FUSE 在背景執行
-python waynefs.py --image waynefs.img --mountpoint $MNT &
+python waynefs.py --image waynefs.img --mountpoint $MNT&
 
 # 使用 '$!' 這個特殊變數來取得「最後一個」背景程式的 PID
 PID=$!
