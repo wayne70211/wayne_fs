@@ -2,6 +2,7 @@ from disk import Disk
 from layout import Superblock
 from transaction import Transaction
 import struct
+from typing import List
 from dataclasses import dataclass
 from enum import Enum
 from contextlib import contextmanager
@@ -60,17 +61,48 @@ class JournalHeader:
 
 @dataclass
 class DescriptorBlock:
+    header: JournalHeader
     num_blocks: int
-    FORMAT = "<I"
+    final_block_addr: List[int]
+
+    FORMAT = "<I" 
+    ADDR_FORMAT = "<I"
 
     def pack(self) -> bytes:
-        return struct.pack(self.FORMAT, self.num_blocks)
+        data = bytearray()
+        data += self.header.pack()
+        data += struct.pack(self.FORMAT, self.num_blocks)
+        for addr in self.final_block_addr:
+            data += struct.pack(self.ADDR_FORMAT, addr)
+        return bytes(data)
     
+    @classmethod
+    def unpack(cls, data: bytes) -> "DescriptorBlock":
+        data_ptr = 0
+        header_size = struct.calcsize(JournalHeader.FORMAT)
+        header = struct.unpack(JournalHeader.FORMAT, data[data_ptr:data_ptr+header_size])
+        data_ptr += header_size
+        num_blocks = struct.unpack(cls.FORMAT, data[data_ptr:data_ptr+struct.calcsize(cls.FORMAT)])
+        data_ptr += struct.calcsize(cls.FORMAT)
+        final_block_addr = []
+        addr_size = struct.calcsize(cls.ADDR_FORMAT)
 
+        for addr in range(num_blocks):
+            final_block_addr.append(struct.unpack(cls.ADDR_FORMAT, data[data_ptr:data_ptr+addr_size]))
+            data_ptr += addr_size
 
+        return cls(header, num_blocks, final_block_addr)
+    
 @dataclass
 class CommitBlock:
     header: JournalHeader
+
+    def pack(self) -> bytes:
+        return self.header.pack()
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "CommitBlock":
+        return cls(JournalHeader.unpack(data))
 
 
 """
@@ -104,7 +136,7 @@ class Journal():
             log_start_block = self.journal_area_start + 1
 
             self.journal_sb = JournalSuperblock(
-                magic=JOURNAL_MAGIC, 
+                magic=JOURNAL_SB_MAGIC, 
                 start_block=log_start_block, 
                 num_blocks=self.journal_area_total_blocks - 1,  # 1 block is used as superblock
                 head=log_start_block, 
@@ -131,6 +163,47 @@ class Journal():
             print(f"Transaction {tx.tid} finished, committing")
             self.commit(tx)
 
+    def commit(self, tx: Transaction):
+        # if no write buffer, return
+        if not tx.write_buffer:
+            return
+        
+        num_blocks = len(tx.write_buffer)
+
+        # descriptor block [header, num_blocks, final_block_addr[:]]
+        curr_block_no = self.journal_sb.tail
+        desc_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_DESCRIPTOR.value, tid=tx.tid)
+        desc_block = DescriptorBlock(header=desc_header, num_blocks=num_blocks, final_block_addr=[key for key in tx.write_buffer])        
+        self.disk.write_block(curr_block_no, desc_block.pack().ljust(self.main_sb.block_size, b'\x00'))
+
+        # data block
+        for final_block_addr in tx.write_buffer:
+            curr_block_no = self._get_next_log_block(curr_block_no)
+            block_type, block_data = tx.write_buffer[final_block_addr]
+            self.disk.write_block(curr_block_no, block_data)
+        
+        # commit block
+        curr_block_no = self._get_next_log_block(curr_block_no)
+        commit_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_COMMIT.value, tid=tx.tid)
+        commit_block = CommitBlock(header=commit_header)
+        self.disk.write_block(curr_block_no, commit_block.pack().ljust(self.main_sb.block_size, b'\x00'))
+
+        # update superblock
+        curr_block_no = self._get_next_log_block(curr_block_no)
+        self.journal_sb.tail = curr_block_no
+        self.journal_sb.last_tid = tx.tid
+        self.disk.write_block(self.main_sb.journal_area_start, self.journal_sb.pack().ljust(self.main_sb.block_size, b'\x00'))
+
+        # replay
+        for final_block_addr in tx.write_buffer:
+            block_type, block_data = tx.write_buffer[final_block_addr]
+            self.disk.write_block(final_block_addr, block_data)
+
+        # update superblock
+        self.journal_sb.head = self.journal_sb.tail
+        self.disk.write_block(self.main_sb.journal_area_start, self.journal_sb.pack().ljust(self.main_sb.block_size, b'\x00'))
+
+
     def recover(self):
         print("Starting journal recovery")
         head = self.journal_sb.head
@@ -140,107 +213,36 @@ class Journal():
             print("Journal is clean. No recovery needed.")
             return
         
-        print(f"Scanning log from head={head} to tail={tail}")
+        curr_block_no = head
         transactions_to_replay = {}
-        
-        current = head
-        while current != tail:
+
+        while curr_block_no != tail:
             try:
-                raw_block = self.disk.read_block(current)
-                header = JournalHeader.unpack(raw_block)
-                print(f"  - Reading block {current}: TID={header.tid}, Type={header.block_type}")
+                data = self.disk.read_block(curr_block_no)
+                header = JournalHeader.unpack(data)
                 if header.block_type == JournalBlockType.BLOCK_TYPE_DESCRIPTOR.value:
-                    desc_content_offset = struct.calcsize(JournalHeader.FORMAT)
-                    num_blocks, = struct.unpack_from("<I", raw_block, desc_content_offset)
-
-                    final_addrs = []
-                    addr_offset = desc_content_offset + struct.calcsize("<I")
-                    for _ in range(num_blocks):
-                        addr, = struct.unpack_from("<I", raw_block, addr_offset)
-                        final_addrs.append(addr)
-                        addr_offset += struct.calcsize("<I")
-
-                    metadata = {}
-                    log_ptr = self._get_next_log_block(current)
-                    for addr in final_addrs:
-                        metadata[addr] = self.disk.read_block(log_ptr)
-                        log_ptr = self._get_next_log_block(log_ptr)
+                    desc_block = DescriptorBlock.unpack(data)
                     
-                    transactions_to_replay[header.tid] = (final_addrs, metadata)
-                elif header.block_type == JournalBlockType.BLOCK_TYPE_COMMIT.value:
-                    if header.tid in transactions_to_replay:
-                        print(f"  - Found commit for TID={header.tid}. Replaying transaction.")
-                        final_addrs, metadata = transactions_to_replay[header.tid]
+                    for final_addr in desc_block.final_block_addr:
+                        curr_block_no = self._get_next_log_block(curr_block_no)
+                        transactions_to_replay[desc_block.header.tid] = (final_addr, self.disk.read_block(final_addr))
 
-                        for addr in final_addrs:
-                            print(f"    - REPLAY: Writing block for final addr {addr}")
-                            self.disk.write_block(addr, metadata[addr])
-                        
-                        del transactions_to_replay[header.tid]
-                        
-                        new_head = current
-                        new_head = self._get_next_log_block(new_head)
-                        self.journal_sb.head = new_head
+                elif header.block_type == JournalBlockType.BLOCK_TYPE_COMMIT.value:
+                    commit_block = CommitBlock(header)
+                    if commit_block.header.tid in transactions_to_replay:
+                        print(f"  - Found commit for TID={commit_block.header.tid}. Replaying transaction.")
+                        for final_addr, data in transactions_to_replay[commit_block.header.tid]:
+                            self.disk.write_block(final_addr, data)
+
+                        del transactions_to_replay[commit_block.header.tid]
+                        self.journal_sb.head = self._get_next_log_block(curr_block_no)
+
             except (ValueError, struct.error) as e:
-                print(f"  - Error reading block {current}: {e}. Stopping recovery scan.")
+                print(f"  - Error reading block {curr_block_no}: {e}. Stopping recovery scan.")
                 break
 
-            current = self._get_next_log_block(current)
+            curr_block_no = self._get_next_log_block(curr_block_no)
         
         print("Recovery finished. Cleaning journal by setting head = tail.")
         self.journal_sb.head = self.journal_sb.tail
         self.disk.write_block(self.journal_area_start, self.journal_sb.pack().ljust(self.main_sb.block_size, b'\x00'))
-        
-    def commit(self, tx: Transaction):
-        if not tx.write_buffer:
-            return
-        
-        # Descriptor Block
-        print(f" Pack JournalHeader tid = {tx.tid}, block_type = {JournalBlockType.BLOCK_TYPE_DESCRIPTOR.value} magic = {JOURNAL_MAGIC}")
-
-        desc_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_DESCRIPTOR.value, tid=tx.tid)
-        final_addrs = list(tx.write_buffer.keys())
-        desc_block_content = DescriptorBlock(num_blocks=len(final_addrs)).pack()
-
-        for addr in final_addrs:
-            desc_block_content += struct.pack("<I", addr)
-
-        full_desc_block = desc_header.pack() + desc_block_content
-        full_desc_block = full_desc_block.ljust(self.main_sb.block_size, b'\x00')
-        current_log_tail = self.journal_sb.tail
-        self.disk.write_block(current_log_tail, full_desc_block)
-
-
-        current_log_tail = self._get_next_log_block(current_log_tail)
-        # Metadata Block
-        for addr in final_addrs:            
-            block_type, block_data= tx.write_buffer[addr] 
-            block_data = block_data.ljust(self.main_sb.block_size, b'\x00')
-            print(f"[DEBUG] addr = {addr} block_type = {block_type} block_data = {len(block_data)}")
-            self.disk.write_block(current_log_tail, block_data)
-            current_log_tail = self._get_next_log_block(current_log_tail)
-
-
-        # Commit Block
-        commit_header = JournalHeader(magic=JOURNAL_MAGIC, block_type=JournalBlockType.BLOCK_TYPE_COMMIT.value, tid=tx.tid)
-        full_commit_block = commit_header.pack().ljust(self.main_sb.block_size, b'\x00')
-
-        self.disk.write_block(current_log_tail, full_commit_block)
-        current_log_tail = self._get_next_log_block(current_log_tail)
-
-        # Update Journal SuperBlock
-        self.journal_sb.tail = current_log_tail
-        self.journal_sb.last_tid = tx.tid
-        self.disk.write_block(self.main_sb.journal_area_start, self.journal_sb.pack().ljust(self.main_sb.block_size, b'\x00'))
-
-        # Checkpoint
-        print(f"  - tx {tx.tid}: Checkpointing... Writing to final locations.")
-        for final_addr, (block_type, block_data) in tx.write_buffer.items():
-            print(f"    - Writing {block_type} to block {final_addr}")
-            self.disk.write_block(final_addr, block_data)
-
-        print(f"  - tx {tx.tid}: Checkpoint complete. Advancing journal head pointer.")
-        self.journal_sb.head = self.journal_sb.tail
-        self.disk.write_block(self.main_sb.journal_area_start, self.journal_sb.pack().ljust(self.main_sb.block_size, b'\x00'))
-
-    
