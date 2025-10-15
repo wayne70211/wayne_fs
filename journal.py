@@ -225,7 +225,7 @@ class Journal():
                     
                     for final_addr in desc_block.final_block_addr:
                         curr_block_no = self._get_next_log_block(curr_block_no)
-                        transactions_to_replay[desc_block.header.tid] = (final_addr, self.disk.read_block(final_addr))
+                        transactions_to_replay[desc_block.header.tid] = (final_addr, self.disk.read_block(curr_block_no))
 
                 elif header.block_type == JournalBlockType.BLOCK_TYPE_COMMIT.value:
                     commit_block = CommitBlock(header)
