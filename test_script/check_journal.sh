@@ -1,87 +1,147 @@
 #!/bin/bash
+#
+# Comprehensive Journaling Crash Recovery Test Suite for WayneFS
+#
 set -e
 source .venv/bin/activate
 
+# --- 設定 ---
 MNT=./mnt
 IMG=waynefs.img
-TEST_DIR=$MNT/recovery_test
+FUSE_PID="" # 全域變數，用於追蹤 FUSE 行程
 
+# --- 顏色與格式 ---
 GREEN="\033[0;32m"
 RED="\033[0;31m"
+YELLOW="\033[1;33m"
 NC="\033[0m"
 
+# --- 清理函式 ---
+# 無論腳本如何結束，都會執行此函式來確保環境乾淨
 finalize() {
-    echo "--- Finalizing ---"
-    # 檢查 FUSE 行程是否還在，如果在就殺掉
+    echo -e "\n${YELLOW}--- Finalizing ---${NC}"
     if [ ! -z "$FUSE_PID" ] && ps -p $FUSE_PID > /dev/null; then
-        echo "Killing FUSE process $FUSE_PID..."
+        echo "Killing leftover FUSE process $FUSE_PID..."
         kill -9 $FUSE_PID || true
     fi
-    # 解除掛載
     echo "Unmounting $MNT..."
     umount $MNT || diskutil unmount $MNT || true
-    # 刪除掛載點
+    echo "Removing mount point $MNT..."
     rmdir $MNT || true
     echo "Cleanup complete."
 }
-# 無論腳本如何結束（正常或錯誤），都執行 finalize 函式
 trap finalize EXIT
 
-# --- 準備階段 ---
-echo "--- Preparing environment ---"
-# 清理舊的掛載點
+# --- 核心測試函式 ---
+# 參數:
+# $1: 測試名稱 (例如 "mkdir")
+# $2: 執行崩潰前的「準備」指令 (可為空)
+# $3: 觸發崩潰的「執行」指令
+# $4: 恢復後用來「驗證」的指令
+run_crash_test() {
+    TEST_NAME=$1
+    PREPARE_CMD=$2
+    EXECUTE_CMD=$3
+    VERIFY_CMD=$4
+
+    echo -e "\n${YELLOW}===== Starting Test: Crash Recovery for [$TEST_NAME] =====${NC}"
+
+    # 1. 準備階段：掛載檔案系統並執行準備指令
+    echo "  [Phase 1] Preparing state for the test..."
+    python waynefs.py --image $IMG --mountpoint $MNT --foreground 1 &
+    FUSE_PID=$! && sleep 2
+    
+    if [ ! -z "$PREPARE_CMD" ]; then
+        eval $PREPARE_CMD
+        echo "    - Preparation command executed."
+    fi
+    
+    # 為了讓準備狀態被寫入磁碟，我們先乾淨地重啟一次
+    kill -9 $FUSE_PID && FUSE_PID=""
+    umount $MNT || diskutil unmount $MNT || true
+    sleep 1
+
+    # 2. 執行並崩潰
+    echo "  [Phase 2] Executing command and simulating crash..."
+    python waynefs.py --image $IMG --mountpoint $MNT --foreground 1 &
+    FUSE_PID=$! && sleep 2
+
+    eval $EXECUTE_CMD
+    echo "    - Command executed. Simulating power failure..."
+    kill -9 $FUSE_PID && FUSE_PID=""
+    umount $MNT || diskutil unmount $MNT || true
+    sleep 1
+
+    # 3. 重啟並恢復
+    echo "  [Phase 3] Remounting to trigger journal recovery..."
+    python waynefs.py --image $IMG --mountpoint $MNT --foreground 1 &
+    FUSE_PID=$! && sleep 2
+
+    # 4. 驗證結果
+    echo -n "  [Phase 4] Verifying result... "
+    if eval $VERIFY_CMD; then
+        echo -e "${GREEN}✅ PASSED${NC}"
+    else
+        echo -e "${RED}❌ FAILED${NC}"
+        echo "      - Verification command failed: '$VERIFY_CMD'"
+        ls -la $MNT # 顯示根目錄內容以供除錯
+        exit 1
+    fi
+
+    # 5. 清理本次測試的 FUSE 程序
+    kill -9 $FUSE_PID && FUSE_PID=""
+    umount $MNT || diskutil unmount $MNT || true
+    sleep 1
+}
+
+# --- 主測試流程 ---
+
+# 0. 初始環境設定
+echo "--- Initializing Test Environment ---"
 if [ -d "$MNT" ]; then
     umount $MNT || diskutil unmount $MNT || true
     rmdir $MNT
 fi
 mkdir -p $MNT
-
-# 建立一個全新的、乾淨的映像檔
-echo "Creating fresh image: $IMG..."
+echo "Creating fresh disk image..."
 python mkwaynefs.py --image $IMG
 
-# --- 測試階段 ---
-echo -e "\n--- Starting Test: Crash after mkdir ---"
+# --- 依序執行所有崩潰恢復測試 ---
 
-# 1. 在背景掛載檔案系統
-echo "Mounting filesystem in background..."
-python waynefs.py --image $IMG --mountpoint $MNT --foreground 1 &
-FUSE_PID=$!
-sleep 2 # 等待 FUSE 完全啟動
-echo "Filesystem mounted with PID: $FUSE_PID"
+# 測試 1: mkdir (建立目錄)
+run_crash_test \
+    "mkdir" \
+    "" \
+    "mkdir $MNT/test_dir" \
+    "[ -d $MNT/test_dir ]"
 
-# 2. 執行一個會寫入中繼資料的操作 (mkdir)
-echo "Performing mkdir operation..."
-mkdir $TEST_DIR
-echo "mkdir command finished."
+# 測試 2: unlink (刪除檔案)
+run_crash_test \
+    "unlink" \
+    "touch $MNT/file_to_delete.txt" \
+    "rm $MNT/file_to_delete.txt" \
+    "[ ! -f $MNT/file_to_delete.txt ]"
 
-# 3. 立刻模擬斷電！
-echo "!!! Simulating crash: Killing filesystem process !!!"
-kill -9 $FUSE_PID
-# 將 FUSE_PID 設為空，避免 finalize 函式再次 kill
-FUSE_PID=""
-sleep 1
+# 測試 3: rmdir (刪除目錄)
+run_crash_test \
+    "rmdir" \
+    "mkdir $MNT/dir_to_delete" \
+    "rmdir $MNT/dir_to_delete" \
+    "[ ! -d $MNT/dir_to_delete ]"
 
-# 4. 解除掛載 (此時 FUSE 行程已死，解除掛載是為了讓系統釋放掛載點)
-echo "Unmounting stale mount point..."
-umount $MNT || diskutil unmount $MNT || true
+# 測試 4: write (寫入檔案內容)
+run_crash_test \
+    "write" \
+    "" \
+    "echo -n 'recovered content' > $MNT/write_test.txt" \
+    "[ \"\$(cat $MNT/write_test.txt)\" == 'recovered content' ]"
 
-# 5. 重新掛載檔案系統，觸發 Journal Recovery
-echo -e "\n--- Restarting Filesystem to trigger recovery ---"
-python waynefs.py --image $IMG --mountpoint $MNT --foreground 1 &
-FUSE_PID=$!
-sleep 2 # 等待 FUSE 完全啟動
-echo "Filesystem remounted with PID: $FUSE_PID"
+# 測試 5: rename (重命名檔案)
+run_crash_test \
+    "rename" \
+    "touch $MNT/old_name.txt" \
+    "mv $MNT/old_name.txt $MNT/new_name.txt" \
+    "[ ! -f $MNT/old_name.txt ] && [ -f $MNT/new_name.txt ]"
 
-# 6. 驗證結果
-echo "Verifying recovery..."
-if [ -d "$TEST_DIR" ]; then
-    echo -e "${GREEN}✅ PASSED: Directory '$TEST_DIR' exists after recovery.${NC}"
-    echo -e "${GREEN}✅ Your journal system successfully recovered the state!${NC}"
-else
-    echo -e "${RED}❌ FAILED: Directory '$TEST_DIR' does NOT exist after recovery.${NC}"
-    ls -la $MNT # 顯示根目錄內容以供除錯
-    exit 1
-fi
-
-echo "--- Test finished successfully ---"
+echo -e "\n${GREEN}🎉🎉🎉 ALL JOURNAL RECOVERY TESTS PASSED! 🎉🎉🎉${NC}"
+echo -e "${GREEN}Your filesystem's journal is robust.${NC}"
