@@ -5,7 +5,7 @@ from disk import Disk
 from bitmap import InodeBitmap, BlockBitmap
 from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState, ceil_div
 from journal import Journal
-from cache import PageCache
+from cache import PageCache, DentryCache
 from typing import List, Tuple, Dict
 
 ROOT_INO = 0 
@@ -21,6 +21,7 @@ class WayneFS(LoggingMixIn, Operations):
 
         # Cache
         self.page_cache = PageCache()
+        self.dentry_cache = DentryCache()
         self.start = time.time()
 
         # Open File Table
@@ -81,6 +82,10 @@ class WayneFS(LoggingMixIn, Operations):
         if path == "/" or path == "":
             return ROOT_INO
         
+        cached_ino = self.dentry_cache.get(path)
+        if cached_ino is not None:
+            return cached_ino
+            
         all_path = [seg for seg in path.split("/") if seg]     
         curr_ino = ROOT_INO
         for name in all_path:
@@ -114,6 +119,7 @@ class WayneFS(LoggingMixIn, Operations):
                 
                 curr_ino = next_ino
 
+        self.dentry_cache.put(path, curr_ino)
         return curr_ino
     
     def _split(self, path: str) -> Tuple[str, str]:
@@ -244,6 +250,8 @@ class WayneFS(LoggingMixIn, Operations):
             self.inode_table.write(parent_ino, parent_inode, tx)
             self.block_bitmap.flush(tx)
             self.inode_bitmap.flush(tx)
+        
+        self.dentry_cache.remove(path)
 
     def open(self, path, flags):
         # Check file existed and get file ino
@@ -418,6 +426,8 @@ class WayneFS(LoggingMixIn, Operations):
 
             self.block_bitmap.flush(tx)
             self.inode_bitmap.flush(tx)
+
+        self.dentry_cache.remove(path)
     
     def truncate(self, path, length, fh=None):
         ino = self._lookup(path)
@@ -454,6 +464,17 @@ class WayneFS(LoggingMixIn, Operations):
     def rename(self, old, new):
         if old == new:
             return
+        
+        try:
+            ino = self._lookup(new)
+            inode = self.inode_table.read(ino)
+            if (inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFDIR:
+                self.rmdir(new)
+            else:
+                self.unlink(new)
+            self.dentry_cache.remove(new)
+        except OSError:
+            pass
 
         old_parent_path, old_name = self._split(old)
         old_parent_ino = self._lookup(old_parent_path)
@@ -509,6 +530,8 @@ class WayneFS(LoggingMixIn, Operations):
             self.inode_table.write(old_parent_ino, old_parent_inode, tx)
             self.inode_table.write(new_parent_ino, new_parent_inode, tx)
             self.inode_table.write(curr_ino, curr_inode, tx)
+
+        self.dentry_cache.remove(old)
     
     def utimens(self, path, times=None):
         ino = self._lookup(path)
