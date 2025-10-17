@@ -18,6 +18,7 @@
 ### 第二階段 
 1. 實作 Ordered Journal 功能，並且驗證
 2. 實作 Page Cache, D-entry Cache 功能，並且驗證
+3. 實作 Indirect Blocks，使檔案大小可以突破原本 direct 指標只有 12 組的限制，並且驗證
 
 ### 第三階段
 1. 設計 Copy-on-Write 機制
