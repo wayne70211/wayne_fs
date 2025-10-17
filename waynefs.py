@@ -5,6 +5,7 @@ from disk import Disk
 from bitmap import InodeBitmap, BlockBitmap
 from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, OpenFileState, ceil_div
 from journal import Journal
+from cache import PageCache
 from typing import List, Tuple, Dict
 
 ROOT_INO = 0 
@@ -17,6 +18,9 @@ class WayneFS(LoggingMixIn, Operations):
         self.block_bitmap = BlockBitmap(self.disk, self.sb)
         self.inode_table = InodeTable(self.disk, self.sb)
         self.journal = Journal(self.disk, self.sb)
+
+        # Cache
+        self.page_cache = PageCache()
         self.start = time.time()
 
         # Open File Table
@@ -33,7 +37,7 @@ class WayneFS(LoggingMixIn, Operations):
         return: List[Tuple[int, str]]
         """
         blk_offset = curr_inode.direct[0]
-        raw = self.disk.read_block(blk_offset)
+        raw = self._read_block_cached(blk_offset)
         return DictEnDecoder.unpack_dir(raw)
     
     def _write_dir_entries(self, curr_inode: Inode,  entries: List[Tuple[str, int]]):
@@ -47,7 +51,7 @@ class WayneFS(LoggingMixIn, Operations):
         blk_offset = curr_inode.direct[0]
         if blk_offset == ROOT_INO:
             return
-        self.disk.write_block(blk_offset, raw_data.ljust(self.sb.block_size, b"\x00"))
+        self._write_block_cached(blk_offset, raw_data.ljust(self.sb.block_size, b"\x00"))
         curr_inode.size = len(raw_data)
 
     def _alloc_inode(self):
@@ -119,6 +123,20 @@ class WayneFS(LoggingMixIn, Operations):
         all_path = [seg for seg in path.split("/") if seg]
 
         return "/".join(all_path[:-1]),all_path[-1]
+    # --- cache helper ---
+    def _read_block_cached(self, block_addr: int) -> bytes:
+        cached_data = self.page_cache.get(block_addr)
+        if cached_data is not None:
+            return cached_data
+        
+        data = self.disk.read_block(block_addr)
+        self.page_cache.put(block_addr, data)
+        return data
+    
+    def _write_block_cached(self, block_addr: int, data: bytes):
+        self.disk.write_block(block_addr, data)
+        self.page_cache.put(block_addr, data)
+
     # --- FUSE ops ---    
     def getattr(self, path, fh=None):
         curr_ino = self._lookup(path)
@@ -164,7 +182,7 @@ class WayneFS(LoggingMixIn, Operations):
         # Data
         child_entries = [(child_ino, "."), (parent_ino, "..")]
         raw_data = DictEnDecoder.pack_dir(child_entries)
-        self.disk.write_block(child_blk, raw_data + b"\x00" * (self.sb.block_size - len(raw_data)))
+        self._write_block_cached(child_blk, raw_data + b"\x00" * (self.sb.block_size - len(raw_data)))
         
         parent_entries.append((child_ino, curr_dir_name))
         self._write_dir_entries(parent_inode, parent_entries)
@@ -302,7 +320,7 @@ class WayneFS(LoggingMixIn, Operations):
             is_partial_write = curr_start_offset != 0 or curr_end_offset != self.sb.block_size
 
             if is_partial_write:
-                curr_block = bytearray(self.disk.read_block(curr_inode.direct[curr_block_idx]))
+                curr_block = bytearray(self._read_block_cached(curr_inode.direct[curr_block_idx]))
             else:
                 curr_block = bytearray(self.sb.block_size)
 
@@ -310,7 +328,7 @@ class WayneFS(LoggingMixIn, Operations):
             curr_block[curr_start_offset: curr_end_offset] = data[data_cursor:data_cursor+need_write_data_len]
             data_cursor += need_write_data_len
 
-            self.disk.write_block(curr_inode.direct[curr_block_idx], bytes(curr_block))
+            self._write_block_cached(curr_inode.direct[curr_block_idx], bytes(curr_block))
 
         # Add Journal record metadata
         with self.journal.begin() as tx:
@@ -348,7 +366,7 @@ class WayneFS(LoggingMixIn, Operations):
             curr_start_offset = offset % self.sb.block_size if curr_block_idx == start_block_idx else 0
             curr_end_offset = (offset + size - 1) % self.sb.block_size + 1 if curr_block_idx == end_block_idx else self.sb.block_size
 
-            curr_block = self.disk.read_block(curr_inode.direct[curr_block_idx])
+            curr_block = self._read_block_cached(curr_inode.direct[curr_block_idx])
             need_read_data_len = curr_end_offset - curr_start_offset
             data[data_cursor:data_cursor+need_read_data_len] = curr_block[curr_start_offset: curr_end_offset]
             data_cursor += need_read_data_len
@@ -419,7 +437,7 @@ class WayneFS(LoggingMixIn, Operations):
                     inode.direct[i] = new_blk
 
                     # write all 0 into new_blk
-                    self.disk.write_block(new_blk,  b'\x00' * self.sb.block_size)
+                    self._write_block_cached(new_blk,  b'\x00' * self.sb.block_size)
                     
         else:
             for i in range(need_blks + 1, original_blks):
