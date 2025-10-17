@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 from disk import Disk
 from layout import Superblock
+from transaction import Transaction
+from typing import Optional
 
 class Bitmap:
-    def __init__(self, disk: Disk, sb: Superblock, start_block: int, num_blocks: int, total_items: int):
+    def __init__(self, disk: Disk, sb: Superblock, start_block: int, num_blocks: int, total_items: int, bitmap_type: str = "Default"):
         self.disk = disk
         self.sb = sb
         self.start_block = start_block
+        self.num_blocks = num_blocks
         self.total_items = total_items
+        self.bitmap_type = bitmap_type
 
         total_bytes = (total_items + 7) // 8
         buf = bytearray()
@@ -41,13 +45,25 @@ class Bitmap:
             i += 1
         return -1
     
-    def flush(self):
-        self.disk.write_at(self.start_block*self.sb.block_size, self.buf)
+    def flush(self, tx: Optional[Transaction] = None):
+        padded_buf = bytearray(self.num_blocks * self.sb.block_size)
+        padded_buf[:len(self.buf)] = self.buf
+
+        if tx:
+            data_ptr = 0
+            for i in range(self.num_blocks):
+                block_data = padded_buf[data_ptr : data_ptr + self.sb.block_size]
+                print(f"[DEBUG] flush {self.bitmap_type} {i} buf size = {len(bytes(self.buf[data_ptr:data_ptr+self.sb.block_size]))}")
+                tx.write(self.start_block + i, block_data, self.bitmap_type)
+                data_ptr += self.sb.block_size
+        else:
+            self.disk.write_at(self.start_block * self.sb.block_size, padded_buf)
+
 
         
 class InodeBitmap(Bitmap):
     def __init__(self, disk: Disk, sb: Superblock):
-        super().__init__(disk, sb, sb.inode_bitmap_start, sb.inode_bitmap_blocks, sb.inode_count)
+        super().__init__(disk, sb, sb.inode_bitmap_start, sb.inode_bitmap_blocks, sb.inode_count, "Inode Bitmap")
 
     def find_free_inode(self, start_idx: int = 0) -> int:
         return self.find_free_entry(max(1, start_idx))
@@ -61,7 +77,7 @@ class InodeBitmap(Bitmap):
 
 class BlockBitmap(Bitmap):
     def __init__(self, disk: Disk, sb: Superblock):
-        super().__init__(disk, sb, sb.block_bitmap_start, sb.block_bitmap_blocks, sb.inode_count)
+        super().__init__(disk, sb, sb.block_bitmap_start, sb.block_bitmap_blocks, sb.total_blocks, "Block Bitmap")
 
     def find_free_block(self, start_idx: int = 0) -> int:
         return self.find_free_entry(max(1, start_idx))

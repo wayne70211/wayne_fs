@@ -2,13 +2,14 @@
 import struct
 from dataclasses import dataclass, field
 from disk import Disk
-from typing import List, Tuple
+from transaction import Transaction
+from typing import Optional
 from enum import IntFlag
 import time
 
 
 MAGIC = b"WAYNE_FS"
-SB_FMT = "<8sIIIIIIIIIII"
+SB_FMT = "<8sIIIIIIIIIIIII"
 SB_SIZE = struct.calcsize(SB_FMT)
 INODE_SIZE = 128
 
@@ -94,6 +95,9 @@ class Superblock:
     # --- Inode Table ---
     inode_table_start: int
     inode_table_blocks: int
+    # --- Jouranl Area ---
+    journal_area_start: int
+    journal_area_total_blocks: int
     # --- Data ---
     data_start: int
 
@@ -114,6 +118,8 @@ class Superblock:
           block_bitmap_blocks,
           inode_table_start,
           inode_table_blocks,
+          journal_area_start,
+          journal_area_total_blocks,
           data_start,
           _reserved) = fields
         disk.block_size = block_size  # sync disk view
@@ -121,6 +127,7 @@ class Superblock:
                    inode_bitmap_start, inode_bitmap_blocks,
                    block_bitmap_start, block_bitmap_blocks,
                    inode_table_start, inode_table_blocks,
+                   journal_area_start, journal_area_total_blocks,
                    data_start)
       
 class DictEnDecoder:
@@ -221,6 +228,7 @@ class InodeTable:
         self.disk = disk
         self.sb = sb
         self.inode_size = inode_size
+        self.inodes_per_block = self.sb.block_size // inode_size
         
     def __inode_offset(self, idx: int) -> int:
         return self.sb.inode_table_start * self.sb.block_size + idx * self.inode_size
@@ -230,9 +238,23 @@ class InodeTable:
         raw = self.disk.read_at(off, self.inode_size)
         return Inode.unpack(raw)
 
-    def write(self, ino: int, inode: Inode):
-        off = self.__inode_offset(ino)
-        self.disk.write_at(off, inode.pack())    
+    def write(self, ino: int, inode: Inode, tx: Optional[Transaction] = None):
+        block_addr = self.sb.inode_table_start + (ino // self.inodes_per_block)
+        offset_in_block = (ino % self.inodes_per_block) * self.inode_size
+
+        if tx and block_addr in tx.write_buffer:
+            _block_type, block_data = tx.write_buffer[block_addr]
+            full_block_data = bytearray(block_data)
+        else:
+            full_block_data = bytearray(self.disk.read_block(block_addr))
+
+        if tx:
+            full_block_data[offset_in_block : offset_in_block + self.inode_size] = inode.pack().ljust(self.inode_size, b'\x00')
+            print(f"[Debug] Inode Table block addr = {block_addr} off = {offset_in_block} ino = {ino}")
+            tx.write(block_addr, bytes(full_block_data), "Inode Table")
+        else:
+            off = self.__inode_offset(ino)
+            self.disk.write_at(off, inode.pack())
 
 @dataclass
 class OpenFileState:
