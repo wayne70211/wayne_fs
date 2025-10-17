@@ -16,9 +16,7 @@
 7. 實作 link, chmod 功能，並且驗證
 
 ### 第二階段 
-1. 實作 statfs, release, flush, fsync 功能，並且驗證
-2. 實作 Indirect Blocks 以支援更大檔案
-3. 實作 Write Cache & Sync 機制
+1. 實作 Ordered Journal 功能，並且驗證
 
 ### 第三階段
 1. 設計 Copy-on-Write 機制
