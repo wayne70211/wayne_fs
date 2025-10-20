@@ -195,8 +195,8 @@ rm "$LINK_A" "$LINK_B"
 
 echo -e "\n${YELLOW}=== 測試 10: Page Cache Performance ===${NC}"
 BIG_FILE="$MNT/big_file_for_cache_test.dat"
-echo "Creating a 40KB file..."
-dd if=/dev/zero of="$BIG_FILE" bs=1K count=40 &>/dev/null
+echo "Creating a 32MB file..."
+dd if=/dev/zero of="$BIG_FILE" bs=1M count=32 &>/dev/null
 echo "Performing first read (cold read from disk)..."
 time cat "$BIG_FILE" > /dev/null
 echo "Performing second read (warm read from cache)..."
@@ -218,6 +218,46 @@ echo "Performing first lookup (cold path)..."
 time ls "$DEEP_FILE" > /dev/null
 echo "Performing second lookup (warm path)..."
 time ls "$DEEP_FILE" > /dev/null
+
+# --- 測試 12: 間接指標 (Indirect Blocks) ---
+echo -e "\n${YELLOW}=== 測試 12: 間接指標 (Indirect Blocks) ===${NC}"
+BIG_FILE="$MNT/indirect_test_file.dat"
+TEST_SIZE_KB=60
+TEST_SIZE_BYTES=$((TEST_SIZE_KB * 1024))
+
+echo "Creating a ${TEST_SIZE_KB}KB file to test singly indirect blocks..."
+# 建立一個 60KB 的檔案 (bs=1K count=60)
+dd if=/dev/zero of="$BIG_FILE" bs=1K count=${TEST_SIZE_KB} &>/dev/null
+
+# 1. 驗證檔案大小
+echo "Verifying file size..."
+FILE_SIZE=$(stat -c %s "$BIG_FILE" 2>/dev/null || stat -f %z "$BIG_FILE")
+if [ "$FILE_SIZE" -eq "$TEST_SIZE_BYTES" ]; then
+    echo -e "${GREEN}✅ PASSED: File size is correct (${FILE_SIZE} bytes).${NC}"
+else
+    echo -e "${RED}❌ FAILED: File size is incorrect. Expected ${TEST_SIZE_BYTES}, Got ${FILE_SIZE}.${NC}"
+    exit 1
+fi
+
+# 2. 驗證檔案內容 (透過讀取並檢查 md5/shasum)
+echo "Verifying file content..."
+# 計算原始 /dev/zero 區塊的校驗和
+ORIG_SUM=$(dd if=/dev/zero bs=1K count=${TEST_SIZE_KB} 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+# 計算讀取檔案的校驗和
+READ_SUM=$(cat "$BIG_FILE" | shasum -a 256 | cut -d' ' -f1)
+
+if [ "$ORIG_SUM" == "$READ_SUM" ]; then
+    echo -e "${GREEN}✅ PASSED: File content is correct (checksum match).${NC}"
+else
+    echo -e "${RED}❌ FAILED: File content mismatch.${NC}"
+    echo "Expected Checksum: $ORIG_SUM"
+    echo "Got Checksum: $READ_SUM"
+    exit 1
+fi
+
+# 3. 清理
+rm "$BIG_FILE"
+echo -e "${GREEN}✅ Indirect block test complete.${NC}"
 
 echo "Cleaning up..."
 rm -rf "$MNT/dir1"
