@@ -7,6 +7,7 @@ from layout import Superblock, DictEnDecoder, Inode, InodeMode, InodeTable, Open
 from journal import Journal
 from cache import PageCache, DentryCache
 from typing import List, Tuple, Dict
+import struct
 
 ROOT_INO = 0 
 
@@ -27,6 +28,9 @@ class WayneFS(LoggingMixIn, Operations):
         # Open File Table
         self.open_file_table: Dict[int, OpenFileState] = {}  # {fh(int): OpenFileState}
         self.next_fh = 0
+
+        ADDRS_PER_BLOCK = self.sb.block_size // 4
+        self.MAX_BLOCKS = 10 + ADDRS_PER_BLOCK + (ADDRS_PER_BLOCK * ADDRS_PER_BLOCK)
 
     # --- helpers ---
     def _iget(self, ino: int) -> Inode:
@@ -129,6 +133,161 @@ class WayneFS(LoggingMixIn, Operations):
         all_path = [seg for seg in path.split("/") if seg]
 
         return "/".join(all_path[:-1]),all_path[-1]
+    
+    def _get_data_block_addr(self, inode: Inode, logical_block_idx: int) -> int:
+        ADDRS_PER_BLOCK = self.sb.block_size // 4     # 1024
+        SINGLY_LIMIT = 10
+        DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK # 10 + 1024 = 1034
+
+        # direct[0] ~ direct[9]
+        if logical_block_idx < SINGLY_LIMIT:
+            return inode.direct[logical_block_idx]
+
+        # direct[10]
+        elif logical_block_idx < DOUBLY_LIMIT:
+            l1_block_content = self._read_block_cached(inode.direct[10])
+            
+            l1_index = logical_block_idx - SINGLY_LIMIT
+            ptr_offset = l1_index * 4
+            
+            addr_bytes = l1_block_content[ptr_offset : ptr_offset + 4]
+            return struct.unpack("<I", addr_bytes)[0]
+
+        # direct[11]
+        else:
+            l1_block_content = self._read_block_cached(inode.direct[11])
+            
+            l1_index = (logical_block_idx - DOUBLY_LIMIT) // ADDRS_PER_BLOCK
+            ptr_offset_l1 = l1_index * 4
+
+            l2_addr_bytes = l1_block_content[ptr_offset_l1 : ptr_offset_l1 + 4]
+            l2_addr = struct.unpack("<I", l2_addr_bytes)[0]
+
+            l2_block_content = self._read_block_cached(l2_addr)
+            
+            l2_index = (logical_block_idx - DOUBLY_LIMIT) % ADDRS_PER_BLOCK
+            ptr_offset_l2 = l2_index * 4
+            
+            addr_bytes = l2_block_content[ptr_offset_l2 : ptr_offset_l2 + 4]
+            return struct.unpack("<I", addr_bytes)[0]
+        
+    def _get_or_alloc_data_block_addr(self, inode: Inode, logical_block_idx: int) -> int:
+        ADDRS_PER_BLOCK = self.sb.block_size // 4     # 1024
+        SINGLY_LIMIT = 10
+        DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK # 10 + 1024 = 1034
+
+        # direct[0] ~ direct[9]
+        if logical_block_idx < SINGLY_LIMIT:
+            if inode.direct[logical_block_idx] == 0:
+                proc_block_addr = self._alloc_block()
+                inode.direct[logical_block_idx] = proc_block_addr
+            return inode.direct[logical_block_idx]
+        
+        # direct[10]
+        elif logical_block_idx < DOUBLY_LIMIT:
+            if inode.direct[10] == 0:
+                inode.direct[10] = self._alloc_block()
+
+            l1_block_content = bytearray(self._read_block_cached(inode.direct[10]))
+            
+            l1_index = logical_block_idx - SINGLY_LIMIT
+            ptr_offset = l1_index * 4
+            
+            addr = struct.unpack("<I", l1_block_content[ptr_offset : ptr_offset + 4])[0]
+
+            # allocate
+            if addr == 0:
+                addr = self._alloc_block()
+                l1_block_content[ptr_offset : ptr_offset + 4] = struct.pack("<I", addr)
+                self._write_block_cached(inode.direct[10], bytes(l1_block_content).ljust(self.sb.block_size, b"\x00"))
+            return addr
+        
+        # direct[11]
+        else:
+            if inode.direct[11] == 0:
+                inode.direct[11] = self._alloc_block()
+
+            l1_block_content = bytearray(self._read_block_cached(inode.direct[11]))
+            
+            l1_index = (logical_block_idx - DOUBLY_LIMIT) // ADDRS_PER_BLOCK
+            ptr_offset_l1 = l1_index * 4
+
+            l2_addr_bytes = l1_block_content[ptr_offset_l1 : ptr_offset_l1 + 4]
+            l2_addr = struct.unpack("<I", l2_addr_bytes)[0]
+
+            if l2_addr == 0:
+                l2_addr = self._alloc_block()
+                l1_block_content[ptr_offset_l1 : ptr_offset_l1 + 4] = struct.pack("<I", l2_addr)
+                self._write_block_cached(inode.direct[11], bytes(l1_block_content).ljust(self.sb.block_size, b"\x00"))
+
+            l2_block_content = bytearray(self._read_block_cached(l2_addr))
+            
+            l2_index = (logical_block_idx - DOUBLY_LIMIT) % ADDRS_PER_BLOCK
+            ptr_offset_l2 = l2_index * 4
+            
+            addr = struct.unpack("<I", l2_block_content[ptr_offset_l2 : ptr_offset_l2 + 4])[0]
+
+            # allocate
+            if addr == 0:
+                addr = self._alloc_block()
+                l2_block_content[ptr_offset_l2 : ptr_offset_l2 + 4] = struct.pack("<I", addr)
+                self._write_block_cached(l2_addr, bytes(l2_block_content).ljust(self.sb.block_size, b"\x00"))
+            return addr
+        
+    def _free_data_blocks(self, inode: Inode, start_block: int, end_block: int):
+        ADDRS_PER_BLOCK = self.sb.block_size // 4     # 1024
+        SINGLY_LIMIT = 10
+        DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK # 10 + 1024 = 1034
+
+        # get addr => free block (addr) => set value 0
+        for logical_block_idx in range(start_block, end_block+1):
+            
+            if logical_block_idx < SINGLY_LIMIT:
+                if inode.direct[logical_block_idx] != 0:
+                    self._free_block(inode.direct[logical_block_idx])
+                    inode.direct[logical_block_idx] = 0
+
+            elif logical_block_idx < DOUBLY_LIMIT:
+                if inode.direct[10] == 0:
+                    continue
+
+                l1_block_content = bytearray(self._read_block_cached(inode.direct[10]))
+                l1_index = logical_block_idx - SINGLY_LIMIT
+                ptr_offset = l1_index * 4
+
+                addr = struct.unpack("<I", l1_block_content[ptr_offset:ptr_offset+4])[0]
+
+                if addr != 0:
+                    self._free_block(addr)
+                    l1_block_content[ptr_offset:ptr_offset+4] = struct.pack("<I", 0)
+                    self._write_block_cached(inode.direct[10], bytes(l1_block_content).ljust(self.sb.block_size, b"\x00"))
+
+            else:
+                if inode.direct[11] == 0:
+                    break
+
+                l1_block_content = bytearray(self._read_block_cached(inode.direct[11]))
+                l1_index = (logical_block_idx - DOUBLY_LIMIT) // ADDRS_PER_BLOCK
+                ptr_offset_l1 = l1_index * 4
+
+                l2_addr_bytes = l1_block_content[ptr_offset_l1 : ptr_offset_l1 + 4]
+                l2_addr = struct.unpack("<I", l2_addr_bytes)[0]
+
+                if l2_addr == 0:
+                    continue
+
+                l2_block_content = bytearray(self._read_block_cached(l2_addr))
+                
+                l2_index = (logical_block_idx - DOUBLY_LIMIT) % ADDRS_PER_BLOCK
+                ptr_offset_l2 = l2_index * 4
+
+                addr = struct.unpack("<I", l2_block_content[ptr_offset_l2 : ptr_offset_l2 + 4])[0]
+
+                if addr != 0:
+                    self._free_block(addr)
+                    l2_block_content[ptr_offset_l2 : ptr_offset_l2 + 4] = struct.pack("<I", 0)
+                    self._write_block_cached(l2_addr, bytes(l2_block_content).ljust(self.sb.block_size, b"\x00"))
+
     # --- cache helper ---
     def _read_block_cached(self, block_addr: int) -> bytes:
         cached_data = self.page_cache.get(block_addr)
@@ -308,14 +467,12 @@ class WayneFS(LoggingMixIn, Operations):
         end_block_idx = (offset + length - 1) // self.sb.block_size
 
         # Check file size constrain (12 direct link)
-        if end_block_idx >= len(curr_inode.direct):
+        if end_block_idx >= self.MAX_BLOCKS:
             raise OSError(errno.EFBIG, "File too large")
         
         # Generate the link from inode direct to disk offset 
         for curr_block_idx in range(start_block_idx, end_block_idx+1):
-            if curr_inode.direct[curr_block_idx] == 0:
-                proc_block_addr = self._alloc_block()
-                curr_inode.direct[curr_block_idx] = proc_block_addr
+            self._get_or_alloc_data_block_addr(curr_inode, curr_block_idx)
 
 
         data_cursor = 0
@@ -327,8 +484,9 @@ class WayneFS(LoggingMixIn, Operations):
 
             is_partial_write = curr_start_offset != 0 or curr_end_offset != self.sb.block_size
 
+            addr = self._get_data_block_addr(curr_inode, curr_block_idx)
             if is_partial_write:
-                curr_block = bytearray(self._read_block_cached(curr_inode.direct[curr_block_idx]))
+                curr_block = bytearray(self._read_block_cached(addr))
             else:
                 curr_block = bytearray(self.sb.block_size)
 
@@ -336,7 +494,7 @@ class WayneFS(LoggingMixIn, Operations):
             curr_block[curr_start_offset: curr_end_offset] = data[data_cursor:data_cursor+need_write_data_len]
             data_cursor += need_write_data_len
 
-            self._write_block_cached(curr_inode.direct[curr_block_idx], bytes(curr_block))
+            self._write_block_cached(addr, bytes(curr_block))
 
         # Add Journal record metadata
         with self.journal.begin() as tx:
@@ -374,7 +532,8 @@ class WayneFS(LoggingMixIn, Operations):
             curr_start_offset = offset % self.sb.block_size if curr_block_idx == start_block_idx else 0
             curr_end_offset = (offset + size - 1) % self.sb.block_size + 1 if curr_block_idx == end_block_idx else self.sb.block_size
 
-            curr_block = self._read_block_cached(curr_inode.direct[curr_block_idx])
+            addr = self._get_data_block_addr(curr_inode, curr_block_idx)
+            curr_block = self._read_block_cached(addr)
             need_read_data_len = curr_end_offset - curr_start_offset
             data[data_cursor:data_cursor+need_read_data_len] = curr_block[curr_start_offset: curr_end_offset]
             data_cursor += need_read_data_len
@@ -413,9 +572,28 @@ class WayneFS(LoggingMixIn, Operations):
         with self.journal.begin() as tx:
             if curr_inode.nlink == 0:
                 # Remove all block and set free
-                for block_no in curr_inode.direct:
-                    if block_no != 0:
-                        self._free_block(block_no)
+                ADDRS_PER_BLOCK = self.sb.block_size // 4
+                SINGLY_LIMIT = 10
+                DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK
+
+                original_blks = ceil_div(curr_inode.size, self.sb.block_size)
+                self._free_data_blocks(curr_inode, 0, original_blks) 
+
+                if original_blks > SINGLY_LIMIT:
+                    self._free_block(curr_inode.direct[10])
+
+                if original_blks > DOUBLY_LIMIT:
+                    l1_block_content = bytearray(self._read_block_cached(curr_inode.direct[11]))
+                    ptr = 0
+                    for i in range(ADDRS_PER_BLOCK):
+                        l2_addr = struct.unpack("<I", l1_block_content[ptr:ptr+4])[0]
+                        if l2_addr != 0:
+                            self._free_block(l2_addr)
+                        else:
+                            break
+                        ptr += 4
+                    self._free_block(curr_inode.direct[11])
+
                 self._free_inode(curr_ino)
             else:
                 self.inode_table.write(curr_ino, curr_inode, tx)
@@ -433,27 +611,42 @@ class WayneFS(LoggingMixIn, Operations):
         ino = self._lookup(path)
         inode = self._iget(ino)
 
+        ADDRS_PER_BLOCK = self.sb.block_size // 4
+        SINGLY_LIMIT = 10
+        DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK
+
         original_blks = ceil_div(inode.size, self.sb.block_size)
         need_blks = ceil_div(length, self.sb.block_size)
 
+        if need_blks > self.MAX_BLOCKS:
+            raise OSError(errno.EFBIG, "File too large for direct blocks")
+
         # extend
         if length > inode.size:
-            if need_blks > len(inode.direct):
-                raise OSError(errno.EFBIG, "File too large for direct blocks")
-            
             for i in range(original_blks, need_blks):
-                if inode.direct[i] == 0:
-                    new_blk = self._alloc_block()
-                    inode.direct[i] = new_blk
-
-                    # write all 0 into new_blk
-                    self._write_block_cached(new_blk,  b'\x00' * self.sb.block_size)
+                addr = self._get_or_alloc_data_block_addr(inode, i)
+                # write all 0 into new_blk
+                self._write_block_cached(addr,  b'\x00' * self.sb.block_size)
                     
         else:
-            for i in range(need_blks + 1, original_blks):
-                if inode.direct[i] != 0:
-                    self._free_block(inode.direct[i])
-                    inode.direct[i] = 0
+            self._free_data_blocks(inode, need_blks, original_blks-1)
+
+            if need_blks < DOUBLY_LIMIT and inode.direct[11] != 0:
+                l1_block_content = bytearray(self._read_block_cached(inode.direct[11]))
+                ptr = 0
+                for i in range(ADDRS_PER_BLOCK):
+                    l2_addr = struct.unpack("<I", l1_block_content[ptr:ptr+4])[0]
+                    if l2_addr != 0:
+                        self._free_block(l2_addr)
+                    else:
+                        break
+                    ptr += 4
+                self._free_block(inode.direct[11])
+                inode.direct[11] = 0
+
+            if need_blks < SINGLY_LIMIT and inode.direct[10] != 0:
+                self._free_block(inode.direct[10])
+                inode.direct[10] = 0
 
         with self.journal.begin() as tx:
             inode.size = length

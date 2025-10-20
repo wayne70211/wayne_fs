@@ -195,8 +195,8 @@ rm "$LINK_A" "$LINK_B"
 
 echo -e "\n${YELLOW}=== 測試 10: Page Cache Performance ===${NC}"
 BIG_FILE="$MNT/big_file_for_cache_test.dat"
-echo "Creating a 40KB file..."
-dd if=/dev/zero of="$BIG_FILE" bs=1K count=40 &>/dev/null
+echo "Creating a 32MB file..."
+dd if=/dev/zero of="$BIG_FILE" bs=1M count=32 &>/dev/null
 echo "Performing first read (cold read from disk)..."
 time cat "$BIG_FILE" > /dev/null
 echo "Performing second read (warm read from cache)..."
@@ -219,9 +219,117 @@ time ls "$DEEP_FILE" > /dev/null
 echo "Performing second lookup (warm path)..."
 time ls "$DEEP_FILE" > /dev/null
 
+echo -e "${GREEN}✅ Dentry Cache test complete. Compare the 'real' times above.${NC}"
+
+# --- 測試 12: 間接指標 (Indirect Blocks) ---
+echo -e "\n${YELLOW}=== 測試 12: 間接指標 (Indirect Blocks) ===${NC}"
+BIG_FILE="$MNT/indirect_test_file.dat"
+TEST_SIZE_KB=60
+TEST_SIZE_BYTES=$((TEST_SIZE_KB * 1024))
+
+echo "Creating a ${TEST_SIZE_KB}KB file to test singly indirect blocks..."
+# 建立一個 60KB 的檔案 (bs=1K count=60)
+dd if=/dev/zero of="$BIG_FILE" bs=1K count=${TEST_SIZE_KB} &>/dev/null
+
+# 1. 驗證檔案大小
+echo "Verifying file size..."
+FILE_SIZE=$(stat -c %s "$BIG_FILE" 2>/dev/null || stat -f %z "$BIG_FILE")
+if [ "$FILE_SIZE" -eq "$TEST_SIZE_BYTES" ]; then
+    echo -e "${GREEN}✅ PASSED: File size is correct (${FILE_SIZE} bytes).${NC}"
+else
+    echo -e "${RED}❌ FAILED: File size is incorrect. Expected ${TEST_SIZE_BYTES}, Got ${FILE_SIZE}.${NC}"
+    exit 1
+fi
+
+# 2. 驗證檔案內容 (透過讀取並檢查 md5/shasum)
+echo "Verifying file content..."
+# 計算原始 /dev/zero 區塊的校驗和
+ORIG_SUM=$(dd if=/dev/zero bs=1K count=${TEST_SIZE_KB} 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+# 計算讀取檔案的校驗和
+READ_SUM=$(cat "$BIG_FILE" | shasum -a 256 | cut -d' ' -f1)
+
+if [ "$ORIG_SUM" == "$READ_SUM" ]; then
+    echo -e "${GREEN}✅ PASSED: File content is correct (checksum match).${NC}"
+else
+    echo -e "${RED}❌ FAILED: File content mismatch.${NC}"
+    echo "Expected Checksum: $ORIG_SUM"
+    echo "Got Checksum: $READ_SUM"
+    exit 1
+fi
+
+# 3. 清理
+rm "$BIG_FILE"
+echo -e "${GREEN}✅ Indirect block test complete.${NC}"
+
+# --- 測試 13: 間接指標 (縮減與釋放) ---
+echo -e "\n${YELLOW}=== 測試 13: 間接指標 (縮減與釋放) ===${NC}"
+TRUNC_FILE="$MNT/truncate_test_file.dat"
+SIZE_BEFORE_KB=60
+SIZE_AFTER_KB=20
+SIZE_BEFORE_BYTES=$((SIZE_BEFORE_KB * 1024))
+SIZE_AFTER_BYTES=$((SIZE_AFTER_KB * 1024))
+
+echo "Creating a ${SIZE_BEFORE_KB}KB file..."
+dd if=/dev/zero of="$TRUNC_FILE" bs=1K count=${SIZE_BEFORE_KB} &>/dev/null
+
+# 1. 測試 truncate (縮減)
+echo "Truncating file from ${SIZE_BEFORE_KB}KB down to ${SIZE_AFTER_KB}KB..."
+truncate -s ${SIZE_AFTER_BYTES} "$TRUNC_FILE"
+
+# 1a. 驗證縮減後的大小
+FILE_SIZE=$(stat -c %s "$TRUNC_FILE" 2>/dev/null || stat -f %z "$TRUNC_FILE")
+if [ "$FILE_SIZE" -eq "$SIZE_AFTER_BYTES" ]; then
+    echo -e "${GREEN}✅ PASSED: Truncate (shrink) size is correct (${FILE_SIZE} bytes).${NC}"
+else
+    echo -e "${RED}❌ FAILED: TruncTATE (shrink) size is incorrect. Expected ${SIZE_AFTER_BYTES}, Got ${FILE_SIZE}.${NC}"
+    exit 1
+fi
+
+# 1b. 驗證縮減後的內容
+ORIG_SUM=$(dd if=/dev/zero bs=1K count=${SIZE_AFTER_KB} 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+READ_SUM=$(cat "$TRUNC_FILE" | shasum -a 256 | cut -d' ' -f1)
+if [ "$ORIG_SUM" == "$READ_SUM" ]; then
+    echo -e "${GREEN}✅ PASSED: Truncated file content is correct.${NC}"
+else
+    echo -e "${RED}❌ FAILED: Truncated file content mismatch.${NC}"
+    exit 1
+fi
+
+# 2. 測試 unlink (已縮減的檔案)
+rm "$TRUNC_FILE"
+if [ ! -f "$TRUNC_FILE" ]; then
+    echo -e "${GREEN}✅ PASSED: unlink (after truncate) successful.${NC}"
+else
+    echo -e "${RED}❌ FAILED: unlink (after truncate) failed.${NC}"
+    exit 1
+fi
+
+# 3. 測試 unlink (直接刪除大檔案)
+echo "Creating another ${SIZE_BEFORE_KB}KB file..."
+dd if=/dev/zero of="$TRUNC_FILE" bs=1K count=${SIZE_BEFORE_KB} &>/dev/null
+rm "$TRUNC_FILE"
+if [ ! -f "$TRUNC_FILE" ]; then
+    echo -e "${GREEN}✅ PASSED: unlink (large file) successful.${NC}"
+else
+    echo -e "${RED}❌ FAILED: unlink (large file) failed.${NC}"
+    exit 1
+fi
+
+# 4. 測試空間回收 (最重要)
+echo "Verifying space reclamation by creating a new large file..."
+dd if=/dev/zero of="$TRUNC_FILE" bs=1K count=${SIZE_BEFORE_KB} &>/dev/null
+FILE_SIZE=$(stat -c %s "$TRUNC_FILE" 2>/dev/null || stat -f %z "$TRUNC_FILE")
+if [ "$FILE_SIZE" -eq "$SIZE_BEFORE_BYTES" ]; then
+    echo -e "${GREEN}✅ PASSED: Space reclamation successful.${NC}"
+else
+    echo -e "${RED}❌ FAILED: Space reclamation failed. Could not create new file.${NC}"
+    exit 1
+fi
+rm "$TRUNC_FILE"
+
+echo -e "${GREEN}✅ Indirect block shrinking and freeing tests complete.${NC}"
+
 echo "Cleaning up..."
 rm -rf "$MNT/dir1"
-
-echo -e "${GREEN}✅ Dentry Cache test complete. Compare the 'real' times above.${NC}"
 
 echo -e "\n${GREEN}=== 所有測試結束 ===${NC}"
