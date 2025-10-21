@@ -329,6 +329,63 @@ rm "$TRUNC_FILE"
 
 echo -e "${GREEN}✅ Indirect block shrinking and freeing tests complete.${NC}"
 
+# --- 測試 14: 符號連結 (Symbolic Links) ---
+echo -e "\n${YELLOW}=== 測試 14: 符號連結 (Symbolic Links) ===${NC}"
+TARGET_FILE="$MNT/target_file.txt"
+LINK_NAME="$MNT/link_to_target1"
+echo "I am the target" > "$TARGET_FILE"
+
+# 1. 測試 symlink 建立
+echo "Creating symbolic link..."
+# 確保連結不存在
+rm -f "$LINK_NAME"
+# 使用相對於連結位置的 target 路徑
+ln -s "target_file.txt" "$LINK_NAME" # <-- 正確的相對路徑！
+if [ ! -L "$LINK_NAME" ]; then
+    echo -e "${RED}❌ FAILED: Symbolic link not created.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ PASSED: Symbolic link created.${NC}"
+
+# 2. 測試 readlink
+echo "Testing readlink..."
+LINK_PATH=$(readlink "$LINK_NAME")
+# 預期 readlink 回傳我們儲存的路徑字串
+EXPECTED_LINK_PATH="target_file.txt" # <-- 預期相對路徑
+if [ "$LINK_PATH" == "$EXPECTED_LINK_PATH" ]; then
+    echo -e "${GREEN}✅ PASSED: readlink returns correct path ('$LINK_PATH').${NC}"
+else
+    echo -e "${RED}❌ FAILED: readlink returned '$LINK_PATH', expected '$EXPECTED_LINK_PATH'.${NC}"
+    exit 1
+fi
+
+# 3. 測試跟隨 (Following) 連結
+echo "Testing following link (cat)..."
+CONTENT=$(cat "$LINK_NAME")
+if [ "$CONTENT" == "I am the target" ]; then
+    echo -e "${GREEN}✅ PASSED: Following link to read content successful.${NC}"
+else
+    echo -e "${RED}❌ FAILED: Content mismatch when following link. Got '$CONTENT'.${NC}"
+    exit 1
+fi
+
+# 4. 測試 unlink 連結
+echo "Testing unlink of the link..."
+rm "$LINK_NAME"
+if [ -L "$LINK_NAME" ]; then # 檢查連結是否已被移除
+    echo -e "${RED}❌ FAILED: unlink did not remove the link.${NC}"
+    exit 1
+fi
+if [ ! -f "$TARGET_FILE" ]; then # 檢查目標檔案是否還在
+    echo -e "${RED}❌ FAILED: unlink incorrectly removed the target file.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ PASSED: unlink successful (target file remains).${NC}"
+
+# 清理目標檔案
+rm "$TARGET_FILE"
+echo -e "${GREEN}✅ Symbolic link tests complete.${NC}"
+
 echo "Cleaning up..."
 rm -rf "$MNT/dir1"
 
