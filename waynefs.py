@@ -906,6 +906,28 @@ class WayneFS(LoggingMixIn, Operations):
                 target += data
 
         return target[:target_len].decode('utf-8')
+    
+    def statfs(self, path):
+        print(f"--- statfs called ---")
+        f_files_val = self.sb.inode_count
+        f_ffree_val = self.inode_bitmap.free_count
+        f_blocks_val = self.sb.total_blocks
+        f_bfree_val = self.block_bitmap.free_count
+        print(f"statfs: f_files={f_files_val}, f_ffree={f_ffree_val}")
+        print(f"statfs: f_blocks={f_blocks_val}, f_bfree={f_bfree_val}")
+        return dict(
+            f_bsize=self.sb.block_size,
+            f_frsize=self.sb.block_size,
+            f_blocks=self.sb.total_blocks,
+            f_bfree=self.block_bitmap.free_count,
+            f_bavail=self.block_bitmap.free_count,
+            f_files=self.sb.inode_count,
+            f_ffree=self.inode_bitmap.free_count,
+            f_favail=self.inode_bitmap.free_count,
+            f_fsid=0,
+            f_flag=0,
+            f_namemax=255
+        )
 
 
 def main():
