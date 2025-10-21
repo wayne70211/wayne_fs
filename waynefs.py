@@ -571,6 +571,7 @@ class WayneFS(LoggingMixIn, Operations):
         return bytes(data)
     
     def unlink(self, path):
+        print(f"--- unlink called for: {path} ---")
         parent_path, curr_name = self._split(path)
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
@@ -579,6 +580,7 @@ class WayneFS(LoggingMixIn, Operations):
         curr_inode = self._iget(curr_ino)
 
         old_parent_entries = self._read_dir_entries(parent_inode)
+        print(f"unlink: old_parent_entries = {old_parent_entries}")
         new_parent_entries = []
         for child_ino, child_name in old_parent_entries:
             if child_name == curr_name:
@@ -593,31 +595,36 @@ class WayneFS(LoggingMixIn, Operations):
             raise OSError(errno.EISDIR, "Is a directory")
 
         curr_inode.nlink -= 1
-
+        print(f"unlink: new_parent_entries = {new_parent_entries}")
         with self.journal.begin() as tx:
             if curr_inode.nlink == 0:
                 # Remove all block and set free
-                ADDRS_PER_BLOCK = self.sb.block_size // 4
-                SINGLY_LIMIT = 10
-                DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK
+                
+                is_symlink = (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFLNK
+                is_slow_link = is_symlink and curr_inode.size > 48
+                is_regular_or_slow_link = not is_symlink or is_slow_link
 
-                original_blks = ceil_div(curr_inode.size, self.sb.block_size)
-                self._free_data_blocks(curr_inode, 0, original_blks) 
+                if is_regular_or_slow_link:
+                    ADDRS_PER_BLOCK = self.sb.block_size // 4
+                    SINGLY_LIMIT = 10
+                    DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK
+                    original_blks = ceil_div(curr_inode.size, self.sb.block_size)
+                    self._free_data_blocks(curr_inode, 0, original_blks) 
 
-                if original_blks > SINGLY_LIMIT:
-                    self._free_block(curr_inode.direct[10])
+                    if original_blks > SINGLY_LIMIT:
+                        self._free_block(curr_inode.direct[10])
 
-                if original_blks > DOUBLY_LIMIT:
-                    l1_block_content = bytearray(self._read_block_cached(curr_inode.direct[11]))
-                    ptr = 0
-                    for i in range(ADDRS_PER_BLOCK):
-                        l2_addr = struct.unpack("<I", l1_block_content[ptr:ptr+4])[0]
-                        if l2_addr != 0:
-                            self._free_block(l2_addr)
-                        else:
-                            break
-                        ptr += 4
-                    self._free_block(curr_inode.direct[11])
+                    if original_blks > DOUBLY_LIMIT:
+                        l1_block_content = bytearray(self._read_block_cached(curr_inode.direct[11]))
+                        ptr = 0
+                        for i in range(ADDRS_PER_BLOCK):
+                            l2_addr = struct.unpack("<I", l1_block_content[ptr:ptr+4])[0]
+                            if l2_addr != 0:
+                                self._free_block(l2_addr)
+                            else:
+                                break
+                            ptr += 4
+                        self._free_block(curr_inode.direct[11])
 
                 self._free_inode(curr_ino)
             else:
