@@ -90,9 +90,10 @@ class WayneFS(LoggingMixIn, Operations):
         if cached_ino is not None:
             return cached_ino
             
-        all_path = [seg for seg in path.split("/") if seg]     
+        all_path_stack = [seg for seg in path.split("/") if seg][::-1]
         curr_ino = ROOT_INO
-        for name in all_path:
+        while all_path_stack:
+            name = all_path_stack.pop()
             if name == ".":
                 continue
             elif name == "..":
@@ -122,6 +123,30 @@ class WayneFS(LoggingMixIn, Operations):
                     raise OSError(errno.ENOENT, "[C] No such file or directory") 
                 
                 curr_ino = next_ino
+                curr_inode = self._iget(curr_ino)
+                if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFLNK and all_path_stack:
+                    target_len = curr_inode.size
+                    target = bytearray()
+
+                    if target_len <= 48:
+                        target = struct.pack("<12I", *curr_inode.direct)
+                    else:
+                        start_block_idx = 0
+                        end_block_idx = (target_len - 1) // self.sb.block_size
+                        for curr_block_idx in range(start_block_idx, end_block_idx+1):
+                            addr = self._get_data_block_addr(curr_inode, curr_block_idx)
+                            target += self._read_block_cached(addr)
+                    
+                    symlink_name = target[:target_len].decode("utf-8")
+                    if symlink_name.startswith('/'):
+                        curr_ino = ROOT_INO
+                        target_path = [seg for seg in symlink_name.split("/") if seg][::-1]
+                    else:
+                        all_path_stack.append(name)
+                        target_path = [seg for seg in symlink_name.split("/") if seg][::-1]
+
+                    all_path_stack.extend(target_path)
+                    continue
 
         self.dentry_cache.put(path, curr_ino)
         return curr_ino
@@ -802,8 +827,79 @@ class WayneFS(LoggingMixIn, Operations):
         print("trg_parent_ino = ", trg_parent_ino)
 
         return 0
-
     
+    def symlink(self, target: str, source: str):
+        print(f"--- symlink called: source='{source}', target='{target}' ---")
+        link_parent_path, link_name = self._split(target)
+        self.dentry_cache.remove(link_parent_path)
+
+        link_parent_ino = self._lookup(link_parent_path)
+        link_parent_inode = self._iget(link_parent_ino)
+    
+        if (link_parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
+            raise OSError(errno.ENOENT, "Parent directory does not exist")
+        
+        parent_entries = self._read_dir_entries(link_parent_inode)
+        curr_ino = self._alloc_inode()
+        parent_entries.append((curr_ino, link_name))
+        self._write_dir_entries(link_parent_inode, parent_entries)
+
+        target_bytes = source.encode('utf-8')
+        target_len = len(target_bytes)
+
+        is_slow = target_len > 48
+
+        with self.journal.begin() as tx:
+            curr_inode = Inode.empty(mode=(InodeMode.S_IFLNK | 0o777))
+            curr_inode.nlink = 1
+            curr_inode.size = target_len
+
+            if is_slow:
+                start_block_idx = 0
+                end_block_idx = (target_len - 1) // self.sb.block_size
+                ptr = 0
+                for curr_block_idx in range(start_block_idx, end_block_idx+1):
+                    addr = self._get_or_alloc_data_block_addr(curr_inode, curr_block_idx)
+                    data = target_bytes[ptr:ptr+self.sb.block_size]
+                    self._write_block_cached(addr, data.ljust(self.sb.block_size, b'\x00'))
+                    ptr += self.sb.block_size
+            else:
+                padded_target = target_bytes.ljust(48, b'\x00')
+                curr_inode.direct = list(struct.unpack("<12I", padded_target))
+
+            self.inode_table.write(curr_ino, curr_inode, tx)
+            link_parent_inode.ctime = link_parent_inode.mtime = curr_inode.ctime
+            self.inode_table.write(link_parent_ino, link_parent_inode, tx)
+            self.inode_bitmap.flush(tx)
+
+            if is_slow:
+                self.block_bitmap.flush(tx)
+        print(f"--- symlink called end ---")
+        return 0
+
+
+    def readlink(self, path: str):
+        ino = self._lookup(path)
+        inode = self._iget(ino)
+
+        if (inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFLNK:
+            raise OSError(errno.EINVAL, "Not a symbolic link")
+    
+        target_len = inode.size
+        target = bytearray()
+
+        if target_len <= 48:
+            target = struct.pack("<12I", *inode.direct)
+        else:
+            start_block_idx = 0
+            end_block_idx = (target_len - 1) // self.sb.block_size
+            for curr_block_idx in range(start_block_idx, end_block_idx+1):
+                addr = self._get_data_block_addr(inode, curr_block_idx)
+                data = self._read_block_cached(addr)
+                target += data
+
+        return target[:target_len].decode('utf-8')
+
 
 def main():
     ap = argparse.ArgumentParser()
