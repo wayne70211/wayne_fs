@@ -329,6 +329,183 @@ rm "$TRUNC_FILE"
 
 echo -e "${GREEN}✅ Indirect block shrinking and freeing tests complete.${NC}"
 
+# --- 測試 14: 符號連結 (Symbolic Links) ---
+echo -e "\n${YELLOW}=== 測試 14: 符號連結 (Symbolic Links) ===${NC}"
+TARGET_FILE="$MNT/target_file.txt"
+LINK_NAME="$MNT/link_to_target1"
+echo "I am the target" > "$TARGET_FILE"
+
+# 1. 測試 symlink 建立
+echo "Creating symbolic link..."
+# 確保連結不存在
+rm -f "$LINK_NAME"
+# 使用相對於連結位置的 target 路徑
+ln -s "target_file.txt" "$LINK_NAME" # <-- 正確的相對路徑！
+if [ ! -L "$LINK_NAME" ]; then
+    echo -e "${RED}❌ FAILED: Symbolic link not created.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ PASSED: Symbolic link created.${NC}"
+
+# 2. 測試 readlink
+echo "Testing readlink..."
+LINK_PATH=$(readlink "$LINK_NAME")
+# 預期 readlink 回傳我們儲存的路徑字串
+EXPECTED_LINK_PATH="target_file.txt" # <-- 預期相對路徑
+if [ "$LINK_PATH" == "$EXPECTED_LINK_PATH" ]; then
+    echo -e "${GREEN}✅ PASSED: readlink returns correct path ('$LINK_PATH').${NC}"
+else
+    echo -e "${RED}❌ FAILED: readlink returned '$LINK_PATH', expected '$EXPECTED_LINK_PATH'.${NC}"
+    exit 1
+fi
+
+# 3. 測試跟隨 (Following) 連結
+echo "Testing following link (cat)..."
+CONTENT=$(cat "$LINK_NAME")
+if [ "$CONTENT" == "I am the target" ]; then
+    echo -e "${GREEN}✅ PASSED: Following link to read content successful.${NC}"
+else
+    echo -e "${RED}❌ FAILED: Content mismatch when following link. Got '$CONTENT'.${NC}"
+    exit 1
+fi
+
+# 4. 測試 unlink 連結
+echo "Testing unlink of the link..."
+rm "$LINK_NAME"
+if [ -L "$LINK_NAME" ]; then # 檢查連結是否已被移除
+    echo -e "${RED}❌ FAILED: unlink did not remove the link.${NC}"
+    exit 1
+fi
+if [ ! -f "$TARGET_FILE" ]; then # 檢查目標檔案是否還在
+    echo -e "${RED}❌ FAILED: unlink incorrectly removed the target file.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ PASSED: unlink successful (target file remains).${NC}"
+
+# 清理目標檔案
+rm "$TARGET_FILE"
+echo -e "${GREEN}✅ Symbolic link tests complete.${NC}"
+
+# --- 測試 15: 檔案系統統計 (statfs / df) ---
+echo -e "\n${YELLOW}=== 測試 15: 檔案系統統計 (statfs / df) ===${NC}"
+
+echo "Running df -h on the mount point..."
+# 執行 df 指令並將輸出存到變數
+DF_OUTPUT=$(df -h "$MNT")
+
+# 檢查 df 指令是否成功
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✅ PASSED: 'df -h' command executed successfully.${NC}"
+    echo "--- df output ---"
+    echo "$DF_OUTPUT" # 印出 df 的結果
+    echo "-----------------"
+else
+    echo -e "${RED}❌ FAILED: 'df -h' command failed.${NC}"
+    exit 1
+fi
+
+# (可選) 檢查輸出是否包含掛載點路徑
+if echo "$DF_OUTPUT" | grep -q "$MNT"; then
+    echo -e "${GREEN}✅ PASSED: df output includes the mount point path.${NC}"
+else
+    echo -e "${RED}❌ FAILED: df output does not seem to include the mount point path.${NC}"
+    # 我們不 exit 1，因為不同系統的 df 格式可能略有差異
+fi
+
+echo -e "${GREEN}✅ statfs tests complete.${NC}"
+
+
+# --- 測試 16: statfs 內部計數驗證 ---
+echo -e "\n${YELLOW}=== 測試 16: statfs 內部計數驗證 ===${NC}"
+TEST_FILE_STATFS="$MNT/statfs_test.txt"
+TEST_DIR_STATFS="$MNT/statfs_dir"
+FUSE_LOG="fuse_output.log" # 將 FUSE log 導向檔案
+
+# 0. 重啟 FUSE 並將 log 導向檔案
+echo "Restarting FUSE with log redirection..."
+if [ ! -z "$PID" ] && ps -p $PID > /dev/null; then # 檢查 PID 是否存在
+    echo "Killing previous FUSE process $PID..."
+    kill -9 $PID || true # 強制 kill
+fi
+umount "$MNT" || diskutil unmount force "$MNT" || true # 同時嘗試 umount 和 diskutil
+sleep 1
+# 這次不加 &，讓 FUSE 在前景執行，但把 stdout/stderr 導到 log 檔
+python waynefs.py --image waynefs.img --mountpoint $MNT --foreground 1 > "$FUSE_LOG" 2>&1 &
+PID=$!
+sleep 4 # 等待 FUSE 啟動
+
+# 1. 觸發 statfs 並獲取初始值
+echo "Getting initial statfs values..."
+df "$MNT" > /dev/null # <-- 修改：使用 df 觸發 statfs
+sleep 3 # 等待 log 寫入
+INITIAL_FFREE=$(grep 'statfs: f_files=' "$FUSE_LOG" | tail -1 | sed -n 's/.*f_ffree=\([0-9]*\).*/\1/p')
+INITIAL_BFREE=$(grep 'statfs: f_blocks=' "$FUSE_LOG" | tail -1 | sed -n 's/.*f_bfree=\([0-9]*\).*/\1/p')
+
+if [ -z "$INITIAL_FFREE" ] || [ -z "$INITIAL_BFREE" ]; then
+    echo -e "${RED}❌ FAILED: Could not parse initial statfs values from log.${NC}"
+    echo "--- FUSE Log ---" # 提供更多除錯資訊
+    cat "$FUSE_LOG"
+    echo "----------------"
+    exit 1
+fi
+echo "Initial values: f_ffree=$INITIAL_FFREE, f_bfree=$INITIAL_BFREE"
+
+# 2. 建立目錄和檔案 (預計使用 2 inodes, 2 blocks)
+echo "Creating 1 directory and 1 file (1 block)..."
+mkdir "$TEST_DIR_STATFS"
+# 建立一個剛好 4KB 的檔案
+dd if=/dev/zero of="$TEST_FILE_STATFS" bs=4K count=1 &>/dev/null
+
+# 3. 觸發 statfs 並獲取最終值
+echo "Getting final statfs values..."
+df "$MNT" > /dev/null # <-- 修改：再次使用 df 觸發 statfs
+sleep 3 # 等待 log 寫入
+FINAL_FFREE=$(grep 'statfs: f_files=' "$FUSE_LOG" | tail -1 | sed -n 's/.*f_ffree=\([0-9]*\).*/\1/p')
+FINAL_BFREE=$(grep 'statfs: f_blocks=' "$FUSE_LOG" | tail -1 | sed -n 's/.*f_bfree=\([0-9]*\).*/\1/p')
+
+if [ -z "$FINAL_FFREE" ] || [ -z "$FINAL_BFREE" ]; then
+    echo -e "${RED}❌ FAILED: Could not parse final statfs values from log.${NC}"
+    echo "--- FUSE Log ---"
+    cat "$FUSE_LOG"
+    echo "----------------"
+    exit 1
+fi
+echo "Final values: f_ffree=$FINAL_FFREE, f_bfree=$FINAL_BFREE"
+
+# 4. 驗證變化量
+EXPECTED_FFREE_CHANGE=4
+EXPECTED_BFREE_CHANGE=4
+ACTUAL_FFREE_CHANGE=$((INITIAL_FFREE - FINAL_FFREE))
+ACTUAL_BFREE_CHANGE=$((INITIAL_BFREE - FINAL_BFREE))
+
+echo "Verifying changes..."
+FFREE_PASSED=false
+BFREE_PASSED=false
+if [ "$ACTUAL_FFREE_CHANGE" -eq "$EXPECTED_FFREE_CHANGE" ]; then
+    echo -e "${GREEN}✅ PASSED: Inode free count decreased correctly by $ACTUAL_FFREE_CHANGE.${NC}"
+    FFREE_PASSED=true
+else
+    echo -e "${RED}❌ FAILED: Inode free count decreased by $ACTUAL_FFREE_CHANGE, expected $EXPECTED_FFREE_CHANGE.${NC}"
+fi
+
+if [ "$ACTUAL_BFREE_CHANGE" -eq "$EXPECTED_BFREE_CHANGE" ]; then
+    echo -e "${GREEN}✅ PASSED: Block free count decreased correctly by $ACTUAL_BFREE_CHANGE.${NC}"
+    BFREE_PASSED=true
+else
+    echo -e "${RED}❌ FAILED: Block free count decreased by $ACTUAL_BFREE_CHANGE, expected $EXPECTED_BFREE_CHANGE.${NC}"
+fi
+
+# 清理
+rm "$TEST_FILE_STATFS"
+rmdir "$TEST_DIR_STATFS"
+rm "$FUSE_LOG" # 清理 log 檔案
+
+if ! $FFREE_PASSED || ! $BFREE_PASSED ; then
+    exit 1
+fi
+
+echo -e "${GREEN}✅ statfs internal count verification complete.${NC}"
+
 echo "Cleaning up..."
 rm -rf "$MNT/dir1"
 

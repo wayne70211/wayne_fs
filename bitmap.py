@@ -12,13 +12,20 @@ class Bitmap:
         self.num_blocks = num_blocks
         self.total_items = total_items
         self.bitmap_type = bitmap_type
+        self.free_count = 0
+        total_set_bits = 0
 
         total_bytes = (total_items + 7) // 8
         buf = bytearray()
         for i in range(num_blocks):
             buf += self.disk.read_block(start_block + i)
-        
+        print(f"--- Recalculating free count for {bitmap_type} ({total_items} items) ---") 
         self.buf = bytearray(buf[:total_bytes])
+        for i in range(total_items):
+            total_set_bits += 1 if self.is_set(i) else 0
+        
+        self.free_count = self.total_items - total_set_bits
+        print(f"    Total set: {total_set_bits}, Free count: {self.free_count}") 
 
     def _byte_bit(self, idx):
         if not 0 <= idx < self.total_items:
@@ -30,10 +37,16 @@ class Bitmap:
         return (self.buf[b] >> bit) & 1 == 1
 
     def set(self, idx: int):
+        if self.is_set(idx):
+            return
+        self.free_count -= 1
         b, bit = self._byte_bit(idx)
         self.buf[b] |= (1 << bit)
 
     def clear(self, idx: int):
+        if not self.is_set(idx):
+            return
+        self.free_count += 1
         b, bit = self._byte_bit(idx)
         self.buf[b] &= ~(1 << bit)
 

@@ -22,6 +22,8 @@
     - 定義 direct[10] 為單層間接指標
     - 定義 direct[11] 為雙層間接指標
     - 最大檔案寫入可擴充至 (10 + 1024 + 1024 * 1024) * chunk_size = 40KB + 4MB + 4GB ~= 4GB
+4. 實作 symlink, readlink 功能，並且驗證
+5. 實作 statfs 功能，並且驗證
 
 ### 第三階段
 1. 設計 Copy-on-Write 機制

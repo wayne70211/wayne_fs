@@ -90,9 +90,10 @@ class WayneFS(LoggingMixIn, Operations):
         if cached_ino is not None:
             return cached_ino
             
-        all_path = [seg for seg in path.split("/") if seg]     
+        all_path_stack = [seg for seg in path.split("/") if seg][::-1]
         curr_ino = ROOT_INO
-        for name in all_path:
+        while all_path_stack:
+            name = all_path_stack.pop()
             if name == ".":
                 continue
             elif name == "..":
@@ -122,6 +123,30 @@ class WayneFS(LoggingMixIn, Operations):
                     raise OSError(errno.ENOENT, "[C] No such file or directory") 
                 
                 curr_ino = next_ino
+                curr_inode = self._iget(curr_ino)
+                if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFLNK and all_path_stack:
+                    target_len = curr_inode.size
+                    target = bytearray()
+
+                    if target_len <= 48:
+                        target = struct.pack("<12I", *curr_inode.direct)
+                    else:
+                        start_block_idx = 0
+                        end_block_idx = (target_len - 1) // self.sb.block_size
+                        for curr_block_idx in range(start_block_idx, end_block_idx+1):
+                            addr = self._get_data_block_addr(curr_inode, curr_block_idx)
+                            target += self._read_block_cached(addr)
+                    
+                    symlink_name = target[:target_len].decode("utf-8")
+                    if symlink_name.startswith('/'):
+                        curr_ino = ROOT_INO
+                        target_path = [seg for seg in symlink_name.split("/") if seg][::-1]
+                    else:
+                        all_path_stack.append(name)
+                        target_path = [seg for seg in symlink_name.split("/") if seg][::-1]
+
+                    all_path_stack.extend(target_path)
+                    continue
 
         self.dentry_cache.put(path, curr_ino)
         return curr_ino
@@ -546,6 +571,7 @@ class WayneFS(LoggingMixIn, Operations):
         return bytes(data)
     
     def unlink(self, path):
+        print(f"--- unlink called for: {path} ---")
         parent_path, curr_name = self._split(path)
         parent_ino = self._lookup(parent_path)
         parent_inode = self._iget(parent_ino)
@@ -554,6 +580,7 @@ class WayneFS(LoggingMixIn, Operations):
         curr_inode = self._iget(curr_ino)
 
         old_parent_entries = self._read_dir_entries(parent_inode)
+        print(f"unlink: old_parent_entries = {old_parent_entries}")
         new_parent_entries = []
         for child_ino, child_name in old_parent_entries:
             if child_name == curr_name:
@@ -568,31 +595,36 @@ class WayneFS(LoggingMixIn, Operations):
             raise OSError(errno.EISDIR, "Is a directory")
 
         curr_inode.nlink -= 1
-
+        print(f"unlink: new_parent_entries = {new_parent_entries}")
         with self.journal.begin() as tx:
             if curr_inode.nlink == 0:
                 # Remove all block and set free
-                ADDRS_PER_BLOCK = self.sb.block_size // 4
-                SINGLY_LIMIT = 10
-                DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK
+                
+                is_symlink = (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFLNK
+                is_slow_link = is_symlink and curr_inode.size > 48
+                is_regular_or_slow_link = not is_symlink or is_slow_link
 
-                original_blks = ceil_div(curr_inode.size, self.sb.block_size)
-                self._free_data_blocks(curr_inode, 0, original_blks) 
+                if is_regular_or_slow_link:
+                    ADDRS_PER_BLOCK = self.sb.block_size // 4
+                    SINGLY_LIMIT = 10
+                    DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK
+                    original_blks = ceil_div(curr_inode.size, self.sb.block_size)
+                    self._free_data_blocks(curr_inode, 0, original_blks) 
 
-                if original_blks > SINGLY_LIMIT:
-                    self._free_block(curr_inode.direct[10])
+                    if original_blks > SINGLY_LIMIT:
+                        self._free_block(curr_inode.direct[10])
 
-                if original_blks > DOUBLY_LIMIT:
-                    l1_block_content = bytearray(self._read_block_cached(curr_inode.direct[11]))
-                    ptr = 0
-                    for i in range(ADDRS_PER_BLOCK):
-                        l2_addr = struct.unpack("<I", l1_block_content[ptr:ptr+4])[0]
-                        if l2_addr != 0:
-                            self._free_block(l2_addr)
-                        else:
-                            break
-                        ptr += 4
-                    self._free_block(curr_inode.direct[11])
+                    if original_blks > DOUBLY_LIMIT:
+                        l1_block_content = bytearray(self._read_block_cached(curr_inode.direct[11]))
+                        ptr = 0
+                        for i in range(ADDRS_PER_BLOCK):
+                            l2_addr = struct.unpack("<I", l1_block_content[ptr:ptr+4])[0]
+                            if l2_addr != 0:
+                                self._free_block(l2_addr)
+                            else:
+                                break
+                            ptr += 4
+                        self._free_block(curr_inode.direct[11])
 
                 self._free_inode(curr_ino)
             else:
@@ -802,8 +834,101 @@ class WayneFS(LoggingMixIn, Operations):
         print("trg_parent_ino = ", trg_parent_ino)
 
         return 0
-
     
+    def symlink(self, target: str, source: str):
+        print(f"--- symlink called: source='{source}', target='{target}' ---")
+        link_parent_path, link_name = self._split(target)
+        self.dentry_cache.remove(link_parent_path)
+
+        link_parent_ino = self._lookup(link_parent_path)
+        link_parent_inode = self._iget(link_parent_ino)
+    
+        if (link_parent_inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFDIR:
+            raise OSError(errno.ENOENT, "Parent directory does not exist")
+        
+        parent_entries = self._read_dir_entries(link_parent_inode)
+        curr_ino = self._alloc_inode()
+        parent_entries.append((curr_ino, link_name))
+        self._write_dir_entries(link_parent_inode, parent_entries)
+
+        target_bytes = source.encode('utf-8')
+        target_len = len(target_bytes)
+
+        is_slow = target_len > 48
+
+        with self.journal.begin() as tx:
+            curr_inode = Inode.empty(mode=(InodeMode.S_IFLNK | 0o777))
+            curr_inode.nlink = 1
+            curr_inode.size = target_len
+
+            if is_slow:
+                start_block_idx = 0
+                end_block_idx = (target_len - 1) // self.sb.block_size
+                ptr = 0
+                for curr_block_idx in range(start_block_idx, end_block_idx+1):
+                    addr = self._get_or_alloc_data_block_addr(curr_inode, curr_block_idx)
+                    data = target_bytes[ptr:ptr+self.sb.block_size]
+                    self._write_block_cached(addr, data.ljust(self.sb.block_size, b'\x00'))
+                    ptr += self.sb.block_size
+            else:
+                padded_target = target_bytes.ljust(48, b'\x00')
+                curr_inode.direct = list(struct.unpack("<12I", padded_target))
+
+            self.inode_table.write(curr_ino, curr_inode, tx)
+            link_parent_inode.ctime = link_parent_inode.mtime = curr_inode.ctime
+            self.inode_table.write(link_parent_ino, link_parent_inode, tx)
+            self.inode_bitmap.flush(tx)
+
+            if is_slow:
+                self.block_bitmap.flush(tx)
+        print(f"--- symlink called end ---")
+        return 0
+
+
+    def readlink(self, path: str):
+        ino = self._lookup(path)
+        inode = self._iget(ino)
+
+        if (inode.mode & InodeMode.S_IFMT) != InodeMode.S_IFLNK:
+            raise OSError(errno.EINVAL, "Not a symbolic link")
+    
+        target_len = inode.size
+        target = bytearray()
+
+        if target_len <= 48:
+            target = struct.pack("<12I", *inode.direct)
+        else:
+            start_block_idx = 0
+            end_block_idx = (target_len - 1) // self.sb.block_size
+            for curr_block_idx in range(start_block_idx, end_block_idx+1):
+                addr = self._get_data_block_addr(inode, curr_block_idx)
+                data = self._read_block_cached(addr)
+                target += data
+
+        return target[:target_len].decode('utf-8')
+    
+    def statfs(self, path):
+        print(f"--- statfs called ---")
+        f_files_val = self.sb.inode_count
+        f_ffree_val = self.inode_bitmap.free_count
+        f_blocks_val = self.sb.total_blocks
+        f_bfree_val = self.block_bitmap.free_count
+        print(f"statfs: f_files={f_files_val}, f_ffree={f_ffree_val}")
+        print(f"statfs: f_blocks={f_blocks_val}, f_bfree={f_bfree_val}")
+        return dict(
+            f_bsize=self.sb.block_size,
+            f_frsize=self.sb.block_size,
+            f_blocks=self.sb.total_blocks,
+            f_bfree=self.block_bitmap.free_count,
+            f_bavail=self.block_bitmap.free_count,
+            f_files=self.sb.inode_count,
+            f_ffree=self.inode_bitmap.free_count,
+            f_favail=self.inode_bitmap.free_count,
+            f_fsid=0,
+            f_flag=0,
+            f_namemax=255
+        )
+
 
 def main():
     ap = argparse.ArgumentParser()
