@@ -315,17 +315,33 @@ class WayneFS(LoggingMixIn, Operations):
 
     # --- cache helper ---
     def _read_block_cached(self, block_addr: int) -> bytes:
-        cached_data = self.page_cache.get(block_addr)
-        if cached_data is not None:
-            return cached_data
-        
+        if self.page_cache.is_cached(block_addr):
+            return bytes(self.page_cache.get(block_addr).data)
+            
         data = self.disk.read_block(block_addr)
         self.page_cache.put(block_addr, data)
         return data
     
     def _write_block_cached(self, block_addr: int, data: bytes):
-        self.disk.write_block(block_addr, data)
-        self.page_cache.put(block_addr, data)
+        if not self.page_cache.is_cached(block_addr):
+            self.page_cache.put(block_addr, data)
+        
+        page = self.page_cache.get(block_addr)
+        page.data[:] = data
+        page.dirty = True
+    
+    def sync_data_cache(self):
+        dirty_pages = self.page_cache.get_dirty_pages()
+
+        dirty_pages.sort(key=lambda x: x[0])
+        for block_addr, page in dirty_pages:
+            self.disk.write_block(block_addr, bytes(page.data))
+            page.dirty = False
+        
+        if dirty_pages:
+            self.disk.fsync()
+            print(f"[Debug] Synced {len(dirty_pages)} pages to disk.")
+            
 
     # --- FUSE ops ---    
     def getattr(self, path, fh=None):
@@ -928,7 +944,13 @@ class WayneFS(LoggingMixIn, Operations):
             f_flag=0,
             f_namemax=255
         )
-
+    
+    def fsync(self, path, datasync, fh):
+        self.sync_data_cache()
+    
+    def destroy(self, path):
+        self.sync_data_cache()
+        self.disk.close()
 
 def main():
     ap = argparse.ArgumentParser()
