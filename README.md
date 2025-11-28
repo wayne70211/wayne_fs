@@ -7,90 +7,93 @@
 ## 架構圖
 ```mermaid
 graph TD
-    %% --- Style ---
-    classDef user fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10;
+    %% --- Style Definitions ---
+    classDef user fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,rx:10,ry:10;
     classDef vfs fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;
     classDef cache fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,stroke-dasharray: 5 5;
     classDef meta fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;
     classDef jbd fill:#ffebee,stroke:#c62828,stroke-width:2px;
     classDef disk fill:#e0e0e0,stroke:#424242,stroke-width:2px;
-    classDef note fill:#fff,stroke:#333,stroke-dasharray: 2 2;
+    classDef note fill:#ffffff,stroke:#333333,stroke-dasharray: 2 2;
 
     %% --- 1. User Space ---
-    User[User App / Test Script]:::user
+    User[User Application / Test Script]:::user
     
-    %% --- 2. VFS Interface ---
-    subgraph WayneFS ["WayneFS"]
+    %% --- 2. WayneFS Logic Container ---
+    subgraph WayneFS ["WayneFS Process"]
         direction TB
         
-        VFS["WayneFS Class<br/>(FUSE Operations)"]:::vfs
+        %% Entry Point
+        FUSE_Interface["WayneFS Class<br/>(FUSE Operations)"]:::vfs
         
-        %% --- 3. Memory & Metadata Parallel Layers ---
-        subgraph Caching ["Caching Layer (RAM)"]
+        %% --- Memory Layer ---
+        subgraph Memory_Layer ["Caching Layer (RAM)"]
+            direction LR
             DC(Dentry Cache):::cache
-            PC[("Page Cache<br/>(Write-Back)")]:::cache
-            Dirty[Dirty Pages]:::note
-            PC --- Dirty
+            PC[("Page Cache<br/>(Write-Back Mechanism)")]:::cache
+            Dirty_State["Dirty Pages<br/>(Wait for flush)"]:::note
+            PC -.- Dirty_State
         end
 
-        subgraph Metadata ["Metadata Managers"]
+        %% --- Metadata Logic Layer ---
+        subgraph Metadata_Layer ["Metadata Logic"]
             direction LR
             SB[Superblock]:::meta
-            Ops[Directory Ops]:::meta
             IT[Inode Table]:::meta
-            BM[Bitmaps<br/>Inode/Block]:::meta
+            BM[Bitmaps]:::meta
+            DirOps[Dir En/Decoder]:::meta
         end
 
-        %% --- 4. Journaling Subsystem ---
-        subgraph JBD2 ["Journaling Subsystem"]
+        %% --- Consistency Layer ---
+        subgraph JBD2_Layer ["JBD2 Journaling Subsystem"]
             direction TB
-            TX[Current Transaction]:::jbd
-            JM[Journal Manager]:::jbd
+            TX["Transaction<br/>(Tracks: write_buffer & ordered_blocks)"]:::jbd
+            Journal["Journal Manager<br/>(Controls Commit & Recovery)"]:::jbd
         end
 
-        %% --- 5. Driver Layer ---
-        DiskDriver["Disk Driver<br/>(Simulation)"]:::disk
+        %% --- Driver Layer ---
+        DiskDriver["Disk Class<br/>(Raw I/O Wrapper)"]:::disk
     end
 
-    %% --- 6. Physical Storage ---
+    %% --- 3. Physical Storage ---
     subgraph Storage ["Physical Storage"]
         Img[("waynefs.img<br/>(Binary File)")]:::disk
     end
 
-    %% === 連線邏輯 ===
-    
-    %% User -> VFS
-    User -->|syscalls: write/mkdir| VFS
+    %% ==========================================
+    %% Connections & Logic Flow
+    %% ==========================================
 
-    %% VFS -> Caching
-    VFS -->|Path Lookup| DC
-    VFS -->|Read/Write Data| PC
-    
-    %% VFS -> Metadata
-    VFS -- Load/Parse --> Metadata
-    Ops -.-> PC
-    IT -.-> PC
-    BM -.-> PC
+    %% 1. User Interaction
+    User -->|Syscalls| FUSE_Interface
 
-    %% VFS -> JBD2 (Normal Flow)
-    VFS -->|Begin/Commit| JM
+    %% 2. Cache Interaction (Read/Write Path)
+    FUSE_Interface -->|Lookup Path| DC
+    FUSE_Interface -- "1. Write Data (Dirty=True)" --> PC
     
-    %% === 關鍵路徑: Ordered Mode (紅色) ===
-    VFS == 1.Register Dependency ==> TX
-    TX -.->|Track| Dirty
-    JM == 2.Flush Ordered Data ==> PC
-    PC == 3.Sync ==> DiskDriver
+    %% 3. Metadata Parsing
+    FUSE_Interface -- Read/Parse --> Metadata_Layer
+    Metadata_Layer -.-> PC
+
+    %% 4. Transaction Setup
+    FUSE_Interface -- "2. Register Data Dependency" --> TX
+    FUSE_Interface -- "3. Buffer Metadata Updates" --> TX
     
-    %% JBD2 -> Disk (Metadata Log)
-    JM == 4.Write Log ==> DiskDriver
+    %% 5. JBD2 Commit Process (The Critical Path)
+    TX -.->|Linked to| Journal
+    
+    %% Ordered Mode Enforcement (Red Lines)
+    Journal == "4. [Ordered Mode] Flush Dependency" ==> PC
+    PC == "5. Sync Data Blocks" ==> DiskDriver
+    
+    %% Journal Logging
+    Journal -- "6. Write Descriptor/Metadata/Commit" --> DiskDriver
 
-    %% Disk Driver -> Storage
-    DiskDriver <-->|pread/pwrite| Img
+    %% Driver Output
+    DiskDriver <-->|pread / pwrite / fsync| Img
 
-    %% Layout Tuning
+    %% Layout Adjustments
     DC ~~~ PC
-    SB ~~~ Ops ~~~ IT ~~~ BM
-
 ```
 
 分為以下幾階段實作
