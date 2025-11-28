@@ -6,6 +6,7 @@ from typing import List
 from dataclasses import dataclass
 from enum import Enum
 from contextlib import contextmanager
+from cache import PageCache
 
 JOURNAL_SB_MAGIC = b"WAYNE_JOURNAL_SB"
 JOURNAL_MAGIC = b"WAYNE_JOURNAL"
@@ -120,9 +121,10 @@ One Transaction
 
 
 class Journal():
-    def __init__(self, disk: Disk, sb: Superblock):
+    def __init__(self, disk: Disk, sb: Superblock, page_cache: PageCache):
         self.disk = disk
         self.main_sb = sb
+        self.page_cache = page_cache
 
         self.journal_area_start = sb.journal_area_start
         self.journal_area_total_blocks = sb.journal_area_total_blocks
@@ -165,8 +167,20 @@ class Journal():
 
     def commit(self, tx: Transaction):
         # if no write buffer, return
-        if not tx.write_buffer:
+        if not tx.write_buffer and not tx.ordered_data_blocks:
             return
+        
+        # JBD2
+        if tx.ordered_data_blocks:
+            for block_addr in tx.ordered_data_blocks:
+                print(f"[Ordered Mode] Flushing {len(tx.ordered_data_blocks)} dependent data blocks...")
+                if self.page_cache.is_cached(block_addr):
+                    page = self.page_cache.get(block_addr)
+                    if page.dirty:
+                        self.disk.write_block(block_addr, bytes(page.data))
+                        page.dirty = False
+
+            self.disk.fsync()
         
         num_blocks = len(tx.write_buffer)
 

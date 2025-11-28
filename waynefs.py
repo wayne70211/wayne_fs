@@ -18,12 +18,14 @@ class WayneFS(LoggingMixIn, Operations):
         self.inode_bitmap = InodeBitmap(self.disk, self.sb)
         self.block_bitmap = BlockBitmap(self.disk, self.sb)
         self.inode_table = InodeTable(self.disk, self.sb)
-        self.journal = Journal(self.disk, self.sb)
 
         # Cache
         self.page_cache = PageCache()
         self.dentry_cache = DentryCache()
         self.start = time.time()
+
+        # Journal
+        self.journal = Journal(self.disk, self.sb, self.page_cache)
 
         # Open File Table
         self.open_file_table: Dict[int, OpenFileState] = {}  # {fh(int): OpenFileState}
@@ -45,7 +47,7 @@ class WayneFS(LoggingMixIn, Operations):
         raw = self._read_block_cached(blk_offset)
         return DictEnDecoder.unpack_dir(raw)
     
-    def _write_dir_entries(self, curr_inode: Inode,  entries: List[Tuple[str, int]]):
+    def _write_dir_entries(self, curr_inode: Inode,  entries: List[Tuple[str, int]], touched_data_blocks: List[int]):
         """
         curr_inode: Inode obj
         entries: List[Tuple[int, str]]  e.g. [(0, "."), (0, "..")]
@@ -57,6 +59,7 @@ class WayneFS(LoggingMixIn, Operations):
         if blk_offset == ROOT_INO:
             return
         self._write_block_cached(blk_offset, raw_data.ljust(self.sb.block_size, b"\x00"))
+        touched_data_blocks.append(blk_offset)
         curr_inode.size = len(raw_data)
 
     def _alloc_inode(self):
@@ -196,7 +199,7 @@ class WayneFS(LoggingMixIn, Operations):
             addr_bytes = l2_block_content[ptr_offset_l2 : ptr_offset_l2 + 4]
             return struct.unpack("<I", addr_bytes)[0]
         
-    def _get_or_alloc_data_block_addr(self, inode: Inode, logical_block_idx: int) -> int:
+    def _get_or_alloc_data_block_addr(self, inode: Inode, logical_block_idx: int, touched_data_blocks: List[int]) -> int:
         ADDRS_PER_BLOCK = self.sb.block_size // 4     # 1024
         SINGLY_LIMIT = 10
         DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK # 10 + 1024 = 1034
@@ -205,6 +208,9 @@ class WayneFS(LoggingMixIn, Operations):
         if logical_block_idx < SINGLY_LIMIT:
             if inode.direct[logical_block_idx] == 0:
                 proc_block_addr = self._alloc_block()
+                self._write_block_cached(proc_block_addr, b'\x00' * self.sb.block_size)
+                touched_data_blocks.append(proc_block_addr)
+                
                 inode.direct[logical_block_idx] = proc_block_addr
             return inode.direct[logical_block_idx]
         
@@ -212,6 +218,8 @@ class WayneFS(LoggingMixIn, Operations):
         elif logical_block_idx < DOUBLY_LIMIT:
             if inode.direct[10] == 0:
                 inode.direct[10] = self._alloc_block()
+                self._write_block_cached(inode.direct[10], b'\x00' * self.sb.block_size)
+                touched_data_blocks.append(inode.direct[10])
 
             l1_block_content = bytearray(self._read_block_cached(inode.direct[10]))
             
@@ -223,14 +231,21 @@ class WayneFS(LoggingMixIn, Operations):
             # allocate
             if addr == 0:
                 addr = self._alloc_block()
+                self._write_block_cached(addr, b'\x00' * self.sb.block_size)
+                touched_data_blocks.append(addr)
+
                 l1_block_content[ptr_offset : ptr_offset + 4] = struct.pack("<I", addr)
                 self._write_block_cached(inode.direct[10], bytes(l1_block_content).ljust(self.sb.block_size, b"\x00"))
+                touched_data_blocks.append(inode.direct[10])
+
             return addr
         
         # direct[11]
         else:
             if inode.direct[11] == 0:
                 inode.direct[11] = self._alloc_block()
+                self._write_block_cached(inode.direct[11], b'\x00' * self.sb.block_size)
+                touched_data_blocks.append(inode.direct[11])
 
             l1_block_content = bytearray(self._read_block_cached(inode.direct[11]))
             
@@ -242,8 +257,12 @@ class WayneFS(LoggingMixIn, Operations):
 
             if l2_addr == 0:
                 l2_addr = self._alloc_block()
+                self._write_block_cached(l2_addr, b'\x00' * self.sb.block_size)
+                touched_data_blocks.append(l2_addr)
+
                 l1_block_content[ptr_offset_l1 : ptr_offset_l1 + 4] = struct.pack("<I", l2_addr)
                 self._write_block_cached(inode.direct[11], bytes(l1_block_content).ljust(self.sb.block_size, b"\x00"))
+                touched_data_blocks.append(inode.direct[11])
 
             l2_block_content = bytearray(self._read_block_cached(l2_addr))
             
@@ -255,11 +274,16 @@ class WayneFS(LoggingMixIn, Operations):
             # allocate
             if addr == 0:
                 addr = self._alloc_block()
+                self._write_block_cached(addr, b'\x00' * self.sb.block_size)
+                touched_data_blocks.append(addr)
+
                 l2_block_content[ptr_offset_l2 : ptr_offset_l2 + 4] = struct.pack("<I", addr)
                 self._write_block_cached(l2_addr, bytes(l2_block_content).ljust(self.sb.block_size, b"\x00"))
+                touched_data_blocks.append(l2_addr)
+
             return addr
         
-    def _free_data_blocks(self, inode: Inode, start_block: int, end_block: int):
+    def _free_data_blocks(self, inode: Inode, start_block: int, end_block: int, touched_data_blocks: List[int]):
         ADDRS_PER_BLOCK = self.sb.block_size // 4     # 1024
         SINGLY_LIMIT = 10
         DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK # 10 + 1024 = 1034
@@ -286,6 +310,7 @@ class WayneFS(LoggingMixIn, Operations):
                     self._free_block(addr)
                     l1_block_content[ptr_offset:ptr_offset+4] = struct.pack("<I", 0)
                     self._write_block_cached(inode.direct[10], bytes(l1_block_content).ljust(self.sb.block_size, b"\x00"))
+                    touched_data_blocks.append(inode.direct[10])
 
             else:
                 if inode.direct[11] == 0:
@@ -312,20 +337,37 @@ class WayneFS(LoggingMixIn, Operations):
                     self._free_block(addr)
                     l2_block_content[ptr_offset_l2 : ptr_offset_l2 + 4] = struct.pack("<I", 0)
                     self._write_block_cached(l2_addr, bytes(l2_block_content).ljust(self.sb.block_size, b"\x00"))
+                    touched_data_blocks.append(l2_addr)
 
     # --- cache helper ---
     def _read_block_cached(self, block_addr: int) -> bytes:
-        cached_data = self.page_cache.get(block_addr)
-        if cached_data is not None:
-            return cached_data
-        
+        if self.page_cache.is_cached(block_addr):
+            return bytes(self.page_cache.get(block_addr).data)
+            
         data = self.disk.read_block(block_addr)
         self.page_cache.put(block_addr, data)
         return data
     
     def _write_block_cached(self, block_addr: int, data: bytes):
-        self.disk.write_block(block_addr, data)
-        self.page_cache.put(block_addr, data)
+        if not self.page_cache.is_cached(block_addr):
+            self.page_cache.put(block_addr, data)
+        
+        page = self.page_cache.get(block_addr)
+        page.data[:] = data
+        page.dirty = True
+    
+    def sync_data_cache(self):
+        dirty_pages = self.page_cache.get_dirty_pages()
+
+        dirty_pages.sort(key=lambda x: x[0])
+        for block_addr, page in dirty_pages:
+            self.disk.write_block(block_addr, bytes(page.data))
+            page.dirty = False
+        
+        if dirty_pages:
+            self.disk.fsync()
+            print(f"[Debug] Synced {len(dirty_pages)} pages to disk.")
+            
 
     # --- FUSE ops ---    
     def getattr(self, path, fh=None):
@@ -370,14 +412,20 @@ class WayneFS(LoggingMixIn, Operations):
         child_blk = self._alloc_block()
 
         # Data
+        touched_data_blocks = []
         child_entries = [(child_ino, "."), (parent_ino, "..")]
         raw_data = DictEnDecoder.pack_dir(child_entries)
         self._write_block_cached(child_blk, raw_data + b"\x00" * (self.sb.block_size - len(raw_data)))
+        touched_data_blocks.append(child_blk)
         
         parent_entries.append((child_ino, curr_dir_name))
-        self._write_dir_entries(parent_inode, parent_entries)
+        self._write_dir_entries(parent_inode, parent_entries, touched_data_blocks)
 
         with self.journal.begin() as tx:
+
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
+
             # Child Inode
             child_inode = Inode.empty(mode=(InodeMode.S_IFDIR | mode))
             child_inode.nlink = 2
@@ -426,11 +474,16 @@ class WayneFS(LoggingMixIn, Operations):
         parent_inode.nlink -= 1
         assert parent_inode.nlink >= 2
 
+        touched_data_blocks = []
         # write back entries of parent
-        self._write_dir_entries(parent_inode, new_parent_entries)
+        self._write_dir_entries(parent_inode, new_parent_entries, touched_data_blocks)
         
         # write back of parent inode to inode table
         with self.journal.begin() as tx:
+
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
+
             self.inode_table.write(parent_ino, parent_inode, tx)
             self.block_bitmap.flush(tx)
             self.inode_bitmap.flush(tx)
@@ -461,9 +514,14 @@ class WayneFS(LoggingMixIn, Operations):
         
         child_ino = self._alloc_inode()
         parent_entries.append((child_ino, curr_file_name))
-        self._write_dir_entries(parent_inode, parent_entries)
+        touched_data_blocks = []
+        self._write_dir_entries(parent_inode, parent_entries, touched_data_blocks)
 
         with self.journal.begin() as tx:
+
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
+
             child_inode = Inode.empty(mode=(InodeMode.S_IFREG | mode))
             child_inode.nlink = 1
             child_inode.size = 0
@@ -495,10 +553,11 @@ class WayneFS(LoggingMixIn, Operations):
         if end_block_idx >= self.MAX_BLOCKS:
             raise OSError(errno.EFBIG, "File too large")
         
+        touched_data_blocks = []
+
         # Generate the link from inode direct to disk offset 
         for curr_block_idx in range(start_block_idx, end_block_idx+1):
-            self._get_or_alloc_data_block_addr(curr_inode, curr_block_idx)
-
+            self._get_or_alloc_data_block_addr(curr_inode, curr_block_idx, touched_data_blocks)
 
         data_cursor = 0
         # Write buffer
@@ -520,9 +579,14 @@ class WayneFS(LoggingMixIn, Operations):
             data_cursor += need_write_data_len
 
             self._write_block_cached(addr, bytes(curr_block))
+            touched_data_blocks.append(addr)
 
         # Add Journal record metadata
         with self.journal.begin() as tx:
+
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
+
             curr_inode.size = max(curr_inode.size, offset+length)
             curr_inode.mtime = int(time.time())
             self.inode_table.write(curr_file_state.ino, curr_inode, tx)
@@ -590,16 +654,17 @@ class WayneFS(LoggingMixIn, Operations):
         assert len(old_parent_entries) == len(new_parent_entries) + 1
 
         # write back entries of parent
-        self._write_dir_entries(parent_inode, new_parent_entries)
+        touched_data_blocks = []
+        self._write_dir_entries(parent_inode, new_parent_entries, touched_data_blocks)
         if (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFDIR:
             raise OSError(errno.EISDIR, "Is a directory")
 
         curr_inode.nlink -= 1
         print(f"unlink: new_parent_entries = {new_parent_entries}")
+
         with self.journal.begin() as tx:
             if curr_inode.nlink == 0:
                 # Remove all block and set free
-                
                 is_symlink = (curr_inode.mode & InodeMode.S_IFMT) == InodeMode.S_IFLNK
                 is_slow_link = is_symlink and curr_inode.size > 48
                 is_regular_or_slow_link = not is_symlink or is_slow_link
@@ -609,7 +674,7 @@ class WayneFS(LoggingMixIn, Operations):
                     SINGLY_LIMIT = 10
                     DOUBLY_LIMIT = SINGLY_LIMIT + ADDRS_PER_BLOCK
                     original_blks = ceil_div(curr_inode.size, self.sb.block_size)
-                    self._free_data_blocks(curr_inode, 0, original_blks) 
+                    self._free_data_blocks(curr_inode, 0, original_blks, touched_data_blocks) 
 
                     if original_blks > SINGLY_LIMIT:
                         self._free_block(curr_inode.direct[10])
@@ -629,6 +694,9 @@ class WayneFS(LoggingMixIn, Operations):
                 self._free_inode(curr_ino)
             else:
                 self.inode_table.write(curr_ino, curr_inode, tx)
+
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
 
             parent_inode.mtime = parent_inode.ctime = int(time.time())
             # write back of parent inode to inode table
@@ -653,15 +721,17 @@ class WayneFS(LoggingMixIn, Operations):
         if need_blks > self.MAX_BLOCKS:
             raise OSError(errno.EFBIG, "File too large for direct blocks")
 
+        touched_data_blocks = []
         # extend
         if length > inode.size:
             for i in range(original_blks, need_blks):
-                addr = self._get_or_alloc_data_block_addr(inode, i)
+                addr = self._get_or_alloc_data_block_addr(inode, i, touched_data_blocks)
                 # write all 0 into new_blk
                 self._write_block_cached(addr,  b'\x00' * self.sb.block_size)
+                touched_data_blocks.append(addr)
                     
         else:
-            self._free_data_blocks(inode, need_blks, original_blks-1)
+            self._free_data_blocks(inode, need_blks, original_blks-1, touched_data_blocks)
 
             if need_blks < DOUBLY_LIMIT and inode.direct[11] != 0:
                 l1_block_content = bytearray(self._read_block_cached(inode.direct[11]))
@@ -681,6 +751,10 @@ class WayneFS(LoggingMixIn, Operations):
                 inode.direct[10] = 0
 
         with self.journal.begin() as tx:
+
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
+
             inode.size = length
             inode.mtime = inode.ctime = int(time.time())
             self.inode_table.write(ino, inode, tx)
@@ -728,7 +802,8 @@ class WayneFS(LoggingMixIn, Operations):
         curr_inode = self._iget(curr_ino)
 
         old_parent_dentry = [entry for entry in old_parent_dentry if entry[1] != old_name]
-        self._write_dir_entries(old_parent_inode, old_parent_dentry)
+        touched_data_blocks = []
+        self._write_dir_entries(old_parent_inode, old_parent_dentry, touched_data_blocks)
 
         new_parent_dentry = self._read_dir_entries(new_parent_inode)
         new_parent_dentry.append((curr_ino, new_name))
@@ -743,11 +818,15 @@ class WayneFS(LoggingMixIn, Operations):
                 self._write_dir_entries(curr_inode, curr_inode_dentry)
         
         # Write old and new parent d-entry
-        self._write_dir_entries(old_parent_inode, old_parent_dentry)
-        self._write_dir_entries(new_parent_inode, new_parent_dentry)
+        self._write_dir_entries(old_parent_inode, old_parent_dentry, touched_data_blocks)
+        self._write_dir_entries(new_parent_inode, new_parent_dentry, touched_data_blocks)
 
         # Update Inode Table
         with self.journal.begin() as tx:
+
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
+
             current_time = int(time.time())
             old_parent_inode.mtime = old_parent_inode.ctime = current_time
             new_parent_inode.mtime = new_parent_inode.ctime = current_time
@@ -816,11 +895,14 @@ class WayneFS(LoggingMixIn, Operations):
                 raise OSError(errno.EEXIST, "File is existed")
             
         trg_dentry.append((curr_ino, trg_name))
-        self._write_dir_entries(trg_parent_inode, trg_dentry)
+        touched_data_blocks = []
+        self._write_dir_entries(trg_parent_inode, trg_dentry, touched_data_blocks)
         
-        
-
         with self.journal.begin() as tx:
+
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
+
             curr_time = int(time.time())
             curr_inode.ctime = curr_time
             curr_inode.nlink += 1
@@ -849,7 +931,8 @@ class WayneFS(LoggingMixIn, Operations):
         parent_entries = self._read_dir_entries(link_parent_inode)
         curr_ino = self._alloc_inode()
         parent_entries.append((curr_ino, link_name))
-        self._write_dir_entries(link_parent_inode, parent_entries)
+        touched_data_blocks = []
+        self._write_dir_entries(link_parent_inode, parent_entries, touched_data_blocks)
 
         target_bytes = source.encode('utf-8')
         target_len = len(target_bytes)
@@ -866,13 +949,17 @@ class WayneFS(LoggingMixIn, Operations):
                 end_block_idx = (target_len - 1) // self.sb.block_size
                 ptr = 0
                 for curr_block_idx in range(start_block_idx, end_block_idx+1):
-                    addr = self._get_or_alloc_data_block_addr(curr_inode, curr_block_idx)
+                    addr = self._get_or_alloc_data_block_addr(curr_inode, curr_block_idx, touched_data_blocks)
                     data = target_bytes[ptr:ptr+self.sb.block_size]
                     self._write_block_cached(addr, data.ljust(self.sb.block_size, b'\x00'))
                     ptr += self.sb.block_size
+                    touched_data_blocks.append(addr)
             else:
                 padded_target = target_bytes.ljust(48, b'\x00')
                 curr_inode.direct = list(struct.unpack("<12I", padded_target))
+            
+            for block_addr in touched_data_blocks:
+                tx.add_data_dependency(block_addr)
 
             self.inode_table.write(curr_ino, curr_inode, tx)
             link_parent_inode.ctime = link_parent_inode.mtime = curr_inode.ctime
@@ -928,7 +1015,13 @@ class WayneFS(LoggingMixIn, Operations):
             f_flag=0,
             f_namemax=255
         )
-
+    
+    def fsync(self, path, datasync, fh):
+        self.sync_data_cache()
+    
+    def destroy(self, path):
+        self.sync_data_cache()
+        self.disk.close()
 
 def main():
     ap = argparse.ArgumentParser()
