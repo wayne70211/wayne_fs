@@ -1,10 +1,18 @@
 # Wayne File System
 
-## 目標
+## Project Overview
 
-在這個專案中，使用 python 實作 file system 並且利用 macFUSE 掛載，以達到完整檔案系統的功能
+**WayneFS** is a user-space file system implemented from scratch in Python and mounted using FUSE (Filesystem in Userspace).
 
-### 架構圖
+The primary goal of this project is to simulate and understand the low-level internal mechanisms of a file system. Unlike a simple file wrapper, WayneFS manages a raw binary file acting as a physical disk, manually handling block allocation, metadata management, and crash consistency.
+
+It features advanced storage concepts such as **JBD2-style Journaling**, **Write-Back Caching**, and **Indirect Block Addressing**, making it a robust educational tool for understanding Linux storage stacks.
+
+## Architecture
+
+### System Architecture
+The following diagram illustrates the high-level data flow, from the user application down to the physical disk simulation.
+
 ```mermaid
 graph TD
     %% --- Style Definitions ---
@@ -95,7 +103,9 @@ graph TD
     %% Layout Adjustments
     DC ~~~ PC
 ```
-### Inode 關聯圖
+### Inode Relationship Map
+This diagram depicts how Inodes map to physical data blocks, including the logic for direct and indirect pointers.
+
 ```mermaid
 graph TD
     %% --- Styles ---
@@ -106,7 +116,7 @@ graph TD
     classDef invisible fill:none,stroke:none;
 
     %% =================================================
-    %% 1. 上層：Inode Table Region (橫向排列)
+    %% 1. Upper Layer: Inode Table Region (Horizontal)
     %% =================================================
     subgraph Inode_Table_Region ["Inode Table Region<br/>(Array on Disk)"]
         direction LR
@@ -115,17 +125,17 @@ graph TD
         T3["Inode #3<br/>(File B)"]:::table
         T4["..."]:::table
         
-        %% 強制橫向排序
+        %% Force horizontal layout
         T1 ~~~ T2 ~~~ T3 ~~~ T4
     end
 
     %% =================================================
-    %% 2. 下層容器：包含 Inode Detail 和 Data (左右並排)
+    %% 2. Lower Container: Inode Detail and Data (Side-by-Side)
     %% =================================================
     subgraph Lower_Section [" "]
         direction LR
         
-        %% --- 左側：Inode Detail ---
+        %% --- Left: Inode Detail ---
         subgraph Inode_Detail ["Inside Inode #2<br/>(The Metadata)"]
             direction TB
             Meta["Mode: File<br/>Size: 50KB<br/>Nlink: 1"]:::inode
@@ -139,7 +149,7 @@ graph TD
             end
         end
 
-        %% --- 右側：Data Region ---
+        %% --- Right: Data Region ---
         subgraph Data_Region ["Data Block Region<br/>(Physical Blocks)"]
             direction TB
             
@@ -155,13 +165,13 @@ graph TD
     end
 
     %% =================================================
-    %% 連線邏輯
+    %% Connection Logic
     %% =================================================
     
-    %% Table (上) 連到 Detail (下)
+    %% Table (Top) connects to Detail (Bottom)
     T2 --> Inode_Detail
 
-    %% Detail (左) 連到 Data (右)
+    %% Detail (Left) connects to Data (Right)
     P0 -->|points to| B100
     P1 -->|points to| B101
     
@@ -170,35 +180,48 @@ graph TD
     IndexBlock -.->|ptr 1| B600
     IndexBlock -.->|ptr 2| B601
 
-    %% 隱藏下層容器的邊框，讓視覺更乾淨
+    %% Hide the border of the lower container for a cleaner look
     style Lower_Section fill:none,stroke:none;
 ```
 
-分為以下幾階段實作
+## Development Roadmap
 
-### ✅ 第一階段 (基本 CRUD 功能)
-1. 建立 SuperBlock，裡面含有 patition 資訊
-2. 建立 Inode Table，紀錄當前資料的資訊以及實體 offset，就是 LBA
-3. 建立 Bitmap，紀錄哪些實體位置可以使用
-4. 實作 getattr, readdir, mkdir, rmdir 功能，並且驗證
-5. 實作 create, open, write, read 功能，並且驗證
-6. 實作 truncate, rename, utimens 功能，並且驗證
-7. 實作 link, chmod 功能，並且驗證
+The project is divided into four distinct phases, evolving from a simple synchronous file system to a complex, crash-consistent storage engine.
 
-### ✅ 第二階段 (Journal 功能，擴充大小)
-1. 實作 Ordered Journal 功能，並且驗證
-2. 實作 Page Cache, D-entry Cache 功能，並且驗證
-3. 實作 Indirect Blocks，使檔案大小可以突破原本 direct 指標只有 12 組的限制，並且驗證
-    - 定義 direct[10] 為單層間接指標
-    - 定義 direct[11] 為雙層間接指標
-    - 最大檔案寫入可擴充至 (10 + 1024 + 1024 * 1024) * chunk_size = 40KB + 4MB + 4GB ~= 4GB
-4. 實作 symlink, readlink 功能，並且驗證
-5. 實作 statfs 功能，並且驗證
+### ✅ Phase 1: Core Architecture & Basic CRUD
+*Goal: Establish the fundamental on-disk layout and enable basic file operations.*
 
-### ✅ 第三階段 (Cache 功能優化以及 JBD2 導入)
-1. 修改 Cache 機制，從 Write-Through 機制 (每次寫入 page cache 後立刻寫入硬碟) 改成 Write-Back (標記 page cache dirty 等 VFS 下 fsync 才寫入硬碟)
-2. 修改 Journal 機制以達到 JBD2 Ordered 的邏輯，以避免每次 commit journal 時會寫入非 touch 的 data block
+1.  **SuperBlock:** Defined disk partition information and filesystem geometry.
+2.  **Inode Table:** Implemented the metadata storage structure mapping inodes to Logical Block Addresses (LBA).
+3.  **Bitmaps:** Implemented allocation management for Inodes and Data Blocks.
+4.  **Directory Operations:** Implemented `getattr`, `readdir`, `mkdir`, and `rmdir`.
+5.  **File Operations:** Implemented `create`, `open`, `write`, and `read`.
+6.  **Attributes:** Implemented `truncate`, `rename`, and `utimens` (timestamps).
+7.  **Permissions & Links:** Implemented hard `link` and `chmod`.
 
-### 第四階段 (CoW 機制)
-1. 設計 Copy-on-Write 機制
+### ✅ Phase 2: Advanced Features & Journaling
+*Goal: Enhance system capabilities with caching, large file support, and basic journaling.*
+
+1.  **Ordered Journaling:** Implemented a Write-Ahead Logging (WAL) mechanism to ensure metadata consistency.
+2.  **Caching Layer:** Introduced **Page Cache** for file data and **D-entry Cache** for path lookups to improve read performance.
+3.  **Indirect Blocks:** Extended file size limits beyond the initial 12 direct pointers:
+    - Implemented **Singly Indirect Blocks** (`direct[10]`).
+    - Implemented **Doubly Indirect Blocks** (`direct[11]`).
+    - Theoretical max file size expanded to approx. 4GB `(10 + 1024 + 1024*1024) * 4KB`.
+4.  **Symbolic Links:** Implemented `symlink` and `readlink`.
+5.  **Filesystem Statistics:** Implemented `statfs` for disk usage reporting (`df` command).
+
+### ✅ Phase 3: Performance Optimization & JBD2 Integration
+*Goal: Bridge the gap between simulation and real-world OS behavior by optimizing I/O patterns and ensuring crash consistency.*
+
+1.  **Write-Back Caching:**
+    - Transitioned from a slow **Write-Through** mechanism (immediate disk writes) to a **Write-Back** strategy.
+    - Implemented "Dirty Page" tracking, where data persists in RAM until an explicit `fsync` or journal commit occurs.
+2.  **JBD2 "Ordered Mode" Logic:**
+    - Refined the journaling mechanism to strictly follow Linux JBD2's **Ordered Mode**.
+    - **Dependency Tracking:** The system now tracks which data blocks correspond to a transaction.
+    - **Ordering Enforcement:** Ensures that *dirty data blocks are flushed to disk* **before** the associated metadata transaction is committed to the journal, preventing stale data on crash recovery.
+
+### Phase 4: Future Work
+1.  **Copy-on-Write (CoW):** Design and implement a CoW mechanism to support snapshots and non-destructive writes.
 
