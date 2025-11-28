@@ -8,7 +8,11 @@ class Transaction:
         self.journal = journal
         self.tid = tid
         self.write_buffer: Dict[int, Tuple[str, bytes]] = {} 
+        self.ordered_data_blocks = set()
         print(f"Transaction {self.tid} started.")
+    
+    def add_data_dependency(self, block_addr: int):
+        self.ordered_data_blocks.add(block_addr)
 
     def write(self, final_block_addr: int, block_data: bytes, block_type: str = "Unknown"):
         print(f"  - tx {self.tid}: logging write for '{block_type}' to block {final_block_addr}")
